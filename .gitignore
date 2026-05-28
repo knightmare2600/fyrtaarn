@@ -1,0 +1,43 @@
+# Binaries
+dist/
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go
+bin/
+.coverprofile
+
+# IDEs
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
+
+# Linux
+*~
+
+# Logs
+*.log
+
+# Temporary files
+tmp/
+temp/
+
+# Test captures
+captures/
+scans/
+
+# Credentials
+.env
+secrets/
+credentials.json
+
+# Build artifacts
+release/
+
+# Do not commit the output directory
+dist/

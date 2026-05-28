@@ -1,0 +1,51 @@
+name: Build Fyrtaarn
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-24.04
+
+    strategy:
+      matrix:
+        goos: [linux, windows]
+        goarch: [amd64, arm64]
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Download Dependencies
+        run: go mod download
+
+      - name: Build Binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p dist
+
+          NAME="fyrtaarn-${GOOS}-${GOARCH}"
+          if [ "$GOOS" = "windows" ]; then
+            NAME="$NAME.exe"
+          fi
+
+          go build -v -o dist/$NAME ./cmd/fyrtaarn
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fyrtaarn-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+

@@ -1,0 +1,67 @@
+name: Release Fyrtaarn
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
+    runs-on: ubuntu-24.04
+
+    strategy:
+      matrix:
+        goos: [linux, windows, darwin]
+        goarch: [amd64, arm64]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Download deps
+        run: go mod download
+
+      - name: Build binaries
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p dist
+
+          NAME="fyrtaarn-${GOOS}-${GOARCH}"
+          if [ "$GOOS" = "windows" ]; then
+            NAME="$NAME.exe"
+          fi
+
+          go build -ldflags "-X main.Version=${GITHUB_REF_NAME} -X main.Commit=$(git rev-parse --short HEAD) -X main.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o dist/$NAME ./cmd/fyrtaarn
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fyrtaarn-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/*
+

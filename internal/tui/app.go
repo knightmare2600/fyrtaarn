@@ -787,12 +787,21 @@ func renderLoginModal(a *App) string {
 
 func (a *App) aboutView() string {
 	var b strings.Builder
-	b.WriteString("FYRTAARN\n")
+	b.WriteString(HeaderStyle().Render("FYRTAARN") + "\n")
 	b.WriteString("Nordic Out-of-Band Management Toolkit\n\n")
 	b.WriteString(fmt.Sprintf("  Version:     %s\n", a.Version))
 	b.WriteString(fmt.Sprintf("  Commit:      %s\n", a.Commit))
 	b.WriteString(fmt.Sprintf("  Build Date:  %s\n\n", a.BuildDate))
 	b.WriteString("  Dedicated to the work of Dan Kaminsky\n\n")
+
+	if misc.GlobalEgg.Active {
+		b.WriteString("\n")
+		for _, line := range strings.Split(misc.GlobalEgg.Message, "\n") {
+			b.WriteString("  " + line + "\n")
+		}
+		b.WriteString("\n")
+	}
+
 	b.WriteString("  [ESC] Back")
 	return b.String()
 }
