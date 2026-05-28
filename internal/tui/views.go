@@ -3,6 +3,8 @@ package tui
 import (
 	"fmt"
 	"strings"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 func (a *App) renderMCInfo() string {
@@ -13,11 +15,11 @@ func (a *App) renderMCInfo() string {
 		hostIP = a.results[a.selectedHost].IP
 	}
 
-	b.WriteString(fmt.Sprintf("BMC INFORMATION — %s\n", hostIP))
-	b.WriteString(strings.Repeat("═", 50) + "\n\n")
+	b.WriteString(HeaderStyle().Render(fmt.Sprintf("BMC INFORMATION — %s", hostIP)) + "\n")
+	b.WriteString(strings.Repeat("─", 50) + "\n\n")
 
 	if a.mcInfo != nil {
-		b.WriteString("  CONTROLLER\n")
+		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(CurrentTheme.Accent)).Render("  CONTROLLER") + "\n")
 		b.WriteString(fmt.Sprintf("  %-24s %s\n", "Device ID:", a.mcInfo.DeviceID))
 		b.WriteString(fmt.Sprintf("  %-24s %s\n", "Firmware Revision:", a.mcInfo.FirmwareRevision))
 		b.WriteString(fmt.Sprintf("  %-24s %s\n", "IPMI Version:", a.mcInfo.IPMIVersion))
@@ -27,7 +29,7 @@ func (a *App) renderMCInfo() string {
 	}
 
 	if a.lanInfo != nil {
-		b.WriteString("  NETWORK\n")
+		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(CurrentTheme.Accent)).Render("  NETWORK") + "\n")
 		b.WriteString(fmt.Sprintf("  %-24s %s\n", "IP Address:", a.lanInfo.IPAddress))
 		b.WriteString(fmt.Sprintf("  %-24s %s\n", "MAC Address:", a.lanInfo.MACAddress))
 		b.WriteString(fmt.Sprintf("  %-24s %s\n", "Subnet Mask:", a.lanInfo.SubnetMask))
@@ -40,7 +42,7 @@ func (a *App) renderMCInfo() string {
 		if a.chassis.PowerOn {
 			powerStr = "On"
 		}
-		b.WriteString("  CHASSIS\n")
+		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(CurrentTheme.Accent)).Render("  CHASSIS") + "\n")
 		b.WriteString(fmt.Sprintf("  %-24s %s\n", "Power:", powerStr))
 		b.WriteString(fmt.Sprintf("  %-24s %s\n", "Power Fault:", boolYesNo(a.chassis.PowerFault)))
 		b.WriteString(fmt.Sprintf("  %-24s %s\n", "Power Overload:", boolYesNo(a.chassis.PowerOverload)))
@@ -61,8 +63,8 @@ func (a *App) renderSensors() string {
 		hostIP = a.results[a.selectedHost].IP
 	}
 
-	b.WriteString(fmt.Sprintf("SENSORS / SDR — %s\n", hostIP))
-	b.WriteString(strings.Repeat("═", 50) + "\n\n")
+	b.WriteString(HeaderStyle().Render(fmt.Sprintf("SENSORS / SDR — %s", hostIP)) + "\n")
+	b.WriteString(strings.Repeat("─", 50) + "\n\n")
 
 	if len(a.sensors) == 0 {
 		b.WriteString("  No sensor data available.\n")
@@ -80,7 +82,8 @@ func (a *App) renderSensors() string {
 		end = len(a.sensors)
 	}
 
-	b.WriteString(fmt.Sprintf("  %-25s %-22s %s\n", "Sensor", "Reading", "Status"))
+	hdr := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(CurrentTheme.Accent))
+	b.WriteString(fmt.Sprintf("  %s\n", hdr.Render(fmt.Sprintf("%-25s %-22s %s", "Sensor", "Reading", "Status"))))
 	b.WriteString(fmt.Sprintf("  %s\n", strings.Repeat("─", 60)))
 
 	for _, e := range a.sensors[a.sdrOffset:end] {
@@ -101,8 +104,8 @@ func (a *App) renderSEL() string {
 		hostIP = a.results[a.selectedHost].IP
 	}
 
-	b.WriteString(fmt.Sprintf("SYSTEM EVENT LOG — %s\n", hostIP))
-	b.WriteString(strings.Repeat("═", 50) + "\n\n")
+	b.WriteString(HeaderStyle().Render(fmt.Sprintf("SYSTEM EVENT LOG — %s", hostIP)) + "\n")
+	b.WriteString(strings.Repeat("─", 50) + "\n\n")
 
 	if len(a.selEntries) == 0 {
 		b.WriteString("  No events logged.\n")
@@ -126,7 +129,8 @@ func (a *App) renderSEL() string {
 		maxEventWidth = 30
 	}
 
-	b.WriteString(fmt.Sprintf("  %-6s %-20s %s\n", "ID", "Timestamp", "Event"))
+	hdr := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(CurrentTheme.Accent))
+	b.WriteString(fmt.Sprintf("  %s\n", hdr.Render(fmt.Sprintf("%-6s %-20s %s", "ID", "Timestamp", "Event"))))
 	b.WriteString(fmt.Sprintf("  %s\n", strings.Repeat("─", 70)))
 
 	for _, e := range a.selEntries[a.selOffset:end] {
@@ -155,8 +159,8 @@ func (a *App) renderPower() string {
 		hostIP = a.results[a.selectedHost].IP
 	}
 
-	b.WriteString(fmt.Sprintf("POWER CONTROL — %s\n", hostIP))
-	b.WriteString(strings.Repeat("═", 50) + "\n\n")
+	b.WriteString(HeaderStyle().Render(fmt.Sprintf("POWER CONTROL — %s", hostIP)) + "\n")
+	b.WriteString(strings.Repeat("─", 50) + "\n\n")
 
 	if a.chassis != nil {
 		powerStr := "Off"

@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/knightmare2600/fyrtaarn/internal/discovery"
 	"github.com/knightmare2600/fyrtaarn/internal/ipmi"
@@ -690,24 +691,28 @@ func (a *App) View() string {
 /* ---------------- RENDERING HELPERS ---------------- */
 
 func (a *App) renderMenu() string {
-	var items strings.Builder
+	title := HeaderStyle().Render("FYRTAARN")
+
+	var itemLines []string
 	for i, item := range a.menuItems {
-		prefix := "  "
-		if i == a.selected {
-			prefix = "▶ "
-		}
-		items.WriteString(prefix + item + "\n")
+		itemLines = append(itemLines, MenuStyle(i == a.selected).Render("  "+item+"  "))
 	}
 
-	content := fmt.Sprintf("FYRTAARN\nBMC/IPMI Management Toolkit\n\n%s\n[↑↓] Navigate  [Enter] Select  [Q] Quit",
-		strings.TrimRight(items.String(), "\n"))
+	content := lipgloss.JoinVertical(lipgloss.Left,
+		title,
+		"BMC/IPMI Management Toolkit",
+		"",
+		lipgloss.JoinVertical(lipgloss.Left, itemLines...),
+		"",
+		"[↑↓] Navigate  [Enter] Select  [Q] Quit  [F2] Theme",
+	)
 
 	return BorderStyle().Render(content)
 }
 
 func (a *App) renderCIDRScreen() string {
 	var b strings.Builder
-	b.WriteString("SUBNET SCAN\n\n")
+	b.WriteString(HeaderStyle().Render("SUBNET SCAN") + "\n\n")
 	b.WriteString("Enter CIDR subnet to scan:\n\n")
 	b.WriteString(a.cidrInput.View())
 	b.WriteString("\n\n[Enter] Start Scan  [Esc] Cancel")
@@ -717,7 +722,7 @@ func (a *App) renderCIDRScreen() string {
 func (a *App) renderResults() string {
 	var b strings.Builder
 
-	b.WriteString("DISCOVERY TREE\n\n")
+	b.WriteString(HeaderStyle().Render("DISCOVERY TREE") + "\n\n")
 
 	if len(a.results) == 0 {
 		b.WriteString("No hosts discovered.\n")
@@ -729,19 +734,18 @@ func (a *App) renderResults() string {
 		isLast := i == len(a.results)-1
 		selected := i == a.selectedHost
 
-		marker := "  ├─"
+		connector := "├─"
 		if isLast {
-			marker = "  └─"
-		}
-		if selected {
-			if isLast {
-				marker = "  *└─"
-			} else {
-				marker = "  *├─"
-			}
+			connector = "└─"
 		}
 
-		b.WriteString(fmt.Sprintf("%s %s (score=%d)\n", marker, h.IP, h.Confidence))
+		line := fmt.Sprintf("  %s %s (score=%d)", connector, h.IP, h.Confidence)
+
+		if selected {
+			b.WriteString(MenuStyle(true).Render(line) + "\n")
+		} else {
+			b.WriteString(line + "\n")
+		}
 
 		if selected && a.treeExpanded {
 			b.WriteString(fmt.Sprintf("     ├─ vendor: %s\n", h.Vendor))
@@ -807,7 +811,8 @@ func (a *App) applyLayout(content string) string {
 		return content
 	}
 
-	bar := StatusBar(a.width, left, "")
+	right := fmt.Sprintf("[F2] %s", CurrentTheme.Name)
+	bar := StatusBar(a.width, left, right)
 
 	// Pad to fill the terminal so the frame height never changes.
 	lines := strings.Count(content, "\n")
