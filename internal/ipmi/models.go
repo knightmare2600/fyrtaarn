@@ -1,0 +1,44 @@
+package ipmi
+
+type MCInfo struct {
+  DeviceID         string
+  FirmwareRevision string
+  IPMIVersion      string
+  ManufacturerName string
+  ProductName      string
+}
+
+type LANInfo struct {
+  IPAddress  string
+  MACAddress string
+  SubnetMask string
+  Gateway    string
+}
+
+type ChassisStatus struct {
+  PowerOn       bool
+  PowerOverload bool
+  PowerFault    bool
+  DriveFault    bool
+  CoolingFault  bool
+}
+
+type HostDetails struct {
+  MCInfo  *MCInfo
+  LAN     *LANInfo
+  Chassis *ChassisStatus
+}
+
+type SDREntry struct {
+  Name   string
+  Value  string
+  Status string
+}
+
+type SELEntry struct {
+  ID        string
+  Timestamp string
+  Event     string
+  Direction string
+}
+
