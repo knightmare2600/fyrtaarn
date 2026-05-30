@@ -1,0 +1,1 @@
+go mod tidy ; go mod download ; go clean -cache ; GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -o bin/fyrtaarn-armv7 ./cmd/fyrtaarn
