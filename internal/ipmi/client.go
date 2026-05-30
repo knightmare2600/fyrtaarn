@@ -9,18 +9,25 @@ import (
 	"time"
 )
 
-const ipmiTimeout = 15 * time.Second
+const (
+	// Short timeout for single-round-trip commands (mc info, chassis, lan).
+	ipmiShortTimeout = 15 * time.Second
+	// Long timeout for bulk-read commands that iterate the full SDR/SEL/FRU
+	// repository — large BMCs with 60+ sensors can take 60–90 s over LAN.
+	ipmiLongTimeout = 90 * time.Second
+)
 
 func runIPMICommand(
 	host string,
 	user string,
 	pass string,
+	timeout time.Duration,
 	command ...string,
 ) (string, error) {
 
 	defer wipeString(&pass)
 
-	ctx, cancel := context.WithTimeout(context.Background(), ipmiTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	args := []string{
@@ -44,7 +51,7 @@ func runIPMICommand(
 
 	if err != nil {
 		if ctx.Err() != nil {
-			return "", fmt.Errorf("ipmitool timed out after %v", ipmiTimeout)
+			return "", fmt.Errorf("ipmitool timed out after %v — BMC may be slow or unreachable", timeout)
 		}
 		return "", fmt.Errorf("ipmitool: %s", strings.TrimSpace(stderr.String()))
 	}
@@ -53,7 +60,7 @@ func runIPMICommand(
 }
 
 func GetMCInfo(host, user, pass string) (*MCInfo, error) {
-	output, err := runIPMICommand(host, user, pass, "mc", "info")
+	output, err := runIPMICommand(host, user, pass, ipmiShortTimeout, "mc", "info")
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +68,7 @@ func GetMCInfo(host, user, pass string) (*MCInfo, error) {
 }
 
 func GetLANInfo(host, user, pass string) (*LANInfo, error) {
-	output, err := runIPMICommand(host, user, pass, "lan", "print")
+	output, err := runIPMICommand(host, user, pass, ipmiShortTimeout, "lan", "print")
 	if err != nil {
 		return nil, err
 	}
@@ -69,15 +76,23 @@ func GetLANInfo(host, user, pass string) (*LANInfo, error) {
 }
 
 func GetChassisStatus(host, user, pass string) (*ChassisStatus, error) {
-	output, err := runIPMICommand(host, user, pass, "chassis", "status")
+	output, err := runIPMICommand(host, user, pass, ipmiShortTimeout, "chassis", "status")
 	if err != nil {
 		return nil, err
 	}
 	return parseChassisStatus(output), nil
 }
 
+func GetFRU(host, user, pass string) ([]FRUEntry, error) {
+	output, err := runIPMICommand(host, user, pass, ipmiShortTimeout, "fru")
+	if err != nil {
+		return nil, err
+	}
+	return parseFRU(output), nil
+}
+
 func GetSDR(host, user, pass string) ([]SDREntry, error) {
-	output, err := runIPMICommand(host, user, pass, "sdr", "list")
+	output, err := runIPMICommand(host, user, pass, ipmiLongTimeout, "sdr", "list")
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +100,7 @@ func GetSDR(host, user, pass string) ([]SDREntry, error) {
 }
 
 func GetSEL(host, user, pass string) ([]SELEntry, error) {
-	output, err := runIPMICommand(host, user, pass, "sel", "list")
+	output, err := runIPMICommand(host, user, pass, ipmiLongTimeout, "sel", "list")
 	if err != nil {
 		return nil, err
 	}
@@ -93,23 +108,38 @@ func GetSEL(host, user, pass string) ([]SELEntry, error) {
 }
 
 func PowerOn(host, user, pass string) error {
-	_, err := runIPMICommand(host, user, pass, "chassis", "power", "on")
+	_, err := runIPMICommand(host, user, pass, ipmiShortTimeout, "chassis", "power", "on")
 	return err
 }
 
 func PowerOff(host, user, pass string) error {
-	_, err := runIPMICommand(host, user, pass, "chassis", "power", "off")
+	_, err := runIPMICommand(host, user, pass, ipmiShortTimeout, "chassis", "power", "off")
 	return err
 }
 
 func PowerReset(host, user, pass string) error {
-	_, err := runIPMICommand(host, user, pass, "chassis", "power", "reset")
+	_, err := runIPMICommand(host, user, pass, ipmiShortTimeout, "chassis", "power", "reset")
 	return err
 }
 
 func PowerSoft(host, user, pass string) error {
-	_, err := runIPMICommand(host, user, pass, "chassis", "power", "soft")
+	_, err := runIPMICommand(host, user, pass, ipmiShortTimeout, "chassis", "power", "soft")
 	return err
+}
+
+// SOLCmd returns an *exec.Cmd that activates a Serial-over-LAN session.
+// Run it via tea.ExecProcess so the TUI suspends and hands the terminal to
+// ipmitool. The user disconnects with the ipmitool escape sequence (~.).
+// Credentials appear in the process argument list — this is an ipmitool
+// limitation shared by all other commands in this package.
+func SOLCmd(host, user, pass string) *exec.Cmd {
+	return exec.Command("ipmitool",
+		"-I", "lanplus",
+		"-H", host,
+		"-U", user,
+		"-P", pass,
+		"sol", "activate",
+	)
 }
 
 func parseMCInfo(data string) *MCInfo {
@@ -204,6 +234,36 @@ func parseChassisStatus(data string) *ChassisStatus {
 	}
 
 	return status
+}
+
+// parseFRU parses "ipmitool fru" colon-separated output.
+// Lines that begin without leading whitespace and contain "FRU Device" are
+// treated as section headers.
+func parseFRU(data string) []FRUEntry {
+	var entries []FRUEntry
+
+	for _, line := range strings.Split(data, "\n") {
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		field := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+		if field == "" {
+			continue
+		}
+		isHeader := !strings.HasPrefix(line, " ") && strings.Contains(field, "FRU Device")
+		if value == "" && !isHeader {
+			continue
+		}
+		entries = append(entries, FRUEntry{
+			Field:    field,
+			Value:    value,
+			IsHeader: isHeader,
+		})
+	}
+
+	return entries
 }
 
 // parseSDR parses "ipmitool sdr list" pipe-delimited output:

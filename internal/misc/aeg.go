@@ -13,10 +13,10 @@ type EggState struct {
 
 var GlobalEgg EggState
 
-// CheckEggKey detects shibboleth input
-// (ø = deliberate operator marker)
+// CheckEggKey detects shibboleth input.
+// ø = original operator marker; £ = UK keyboard shortcut.
 func CheckEggKey(r rune) bool {
-  return r == 'ø'
+  return r == 'ø' || r == '£'
 }
 
 // TriggerEgg activates hidden state

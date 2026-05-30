@@ -51,7 +51,6 @@ func (a *App) renderMCInfo() string {
 		b.WriteString("\n")
 	}
 
-	b.WriteString("  [S] Sensors  [L] Event Log  [P] Power Control  [ESC] Back")
 	return b.String()
 }
 
@@ -68,13 +67,12 @@ func (a *App) renderSensors() string {
 
 	if len(a.sensors) == 0 {
 		b.WriteString("  No sensor data available.\n")
-		b.WriteString("\n  [ESC] Back")
 		return b.String()
 	}
 
-	visibleLines := a.height - 8
+	visibleLines := a.contentH - 6
 	if visibleLines < 1 {
-		visibleLines = 10
+		visibleLines = 5
 	}
 
 	end := a.sdrOffset + visibleLines
@@ -89,9 +87,6 @@ func (a *App) renderSensors() string {
 	for _, e := range a.sensors[a.sdrOffset:end] {
 		b.WriteString(fmt.Sprintf("  %-25s %-22s %s\n", e.Name, e.Value, e.Status))
 	}
-
-	b.WriteString(fmt.Sprintf("\n  Showing %d–%d of %d  [↑/k] Up  [↓/j] Down  [ESC] Back",
-		a.sdrOffset+1, end, len(a.sensors)))
 
 	return b.String()
 }
@@ -109,13 +104,12 @@ func (a *App) renderSEL() string {
 
 	if len(a.selEntries) == 0 {
 		b.WriteString("  No events logged.\n")
-		b.WriteString("\n  [ESC] Back")
 		return b.String()
 	}
 
-	visibleLines := a.height - 8
+	visibleLines := a.contentH - 6
 	if visibleLines < 1 {
-		visibleLines = 10
+		visibleLines = 5
 	}
 
 	total := len(a.selEntries)
@@ -142,16 +136,15 @@ func (a *App) renderSEL() string {
 		if e.Direction != "" {
 			dir = " [" + e.Direction + "]"
 		}
-		b.WriteString(fmt.Sprintf("  %-6s %-20s %s%s\n", e.ID, e.Timestamp, event, dir))
+		color := selEventColor(e.Direction, e.Event)
+		eventStr := lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Render(event + dir)
+		b.WriteString(fmt.Sprintf("  %-6s %-20s %s\n", e.ID, e.Timestamp, eventStr))
 	}
-
-	b.WriteString(fmt.Sprintf("\n  Showing %d–%d of %d (newest first)  [↑/k] Up  [↓/j] Down  [ESC] Back",
-		a.selOffset+1, end, total))
 
 	return b.String()
 }
 
-func (a *App) renderPower() string {
+func (a *App) renderFRU() string {
 	var b strings.Builder
 
 	hostIP := ""
@@ -159,34 +152,36 @@ func (a *App) renderPower() string {
 		hostIP = a.results[a.selectedHost].IP
 	}
 
-	b.WriteString(HeaderStyle().Render(fmt.Sprintf("POWER CONTROL — %s", hostIP)) + "\n")
+	b.WriteString(HeaderStyle().Render(fmt.Sprintf("FRU / HARDWARE INVENTORY — %s", hostIP)) + "\n")
 	b.WriteString(strings.Repeat("─", 50) + "\n\n")
 
-	if a.chassis != nil {
-		powerStr := "Off"
-		if a.chassis.PowerOn {
-			powerStr = "On"
-		}
-		b.WriteString(fmt.Sprintf("  Current state: %s\n\n", powerStr))
+	if len(a.fru) == 0 {
+		b.WriteString("  No FRU data available.\n")
+		return b.String()
 	}
 
-	if a.powerAction == "" {
-		b.WriteString("  [O]  Power On\n")
-		b.WriteString("  [F]  Power Off (forced)\n")
-		b.WriteString("  [S]  Soft Shutdown (graceful ACPI)\n")
-		b.WriteString("  [R]  Reset\n\n")
-		b.WriteString("  [ESC] Back to BMC Info")
-	} else {
-		labels := map[string]string{
-			"on":    "Power On",
-			"off":   "Power Off (forced)",
-			"soft":  "Soft Shutdown",
-			"reset": "Reset",
+	visibleLines := a.contentH - 6
+	if visibleLines < 1 {
+		visibleLines = 5
+	}
+
+	total := len(a.fru)
+	end := a.fruOffset + visibleLines
+	if end > total {
+		end = total
+	}
+
+	hdr := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(CurrentTheme.Accent))
+
+	for _, e := range a.fru[a.fruOffset:end] {
+		if e.IsHeader {
+			b.WriteString("\n  " + hdr.Render("── "+e.Field+" ──") + "\n")
+			if e.Value != "" {
+				b.WriteString(fmt.Sprintf("  %s\n", e.Value))
+			}
+		} else {
+			b.WriteString(fmt.Sprintf("  %-30s %s\n", e.Field+":", e.Value))
 		}
-		b.WriteString(fmt.Sprintf("  Confirm: %s %s?\n\n", labels[a.powerAction], hostIP))
-		b.WriteString("  [Y]  Confirm\n")
-		b.WriteString("  [N]  Cancel\n\n")
-		b.WriteString("  [ESC] Cancel")
 	}
 
 	return b.String()
@@ -201,4 +196,44 @@ func boolYesNo(v bool) string {
 		return "Yes"
 	}
 	return "No"
+}
+
+// selEventColor returns a Solarized-palette hex color based on SEL event
+// severity. Ordering of checks matters: "non-recoverable" must be tested
+// before "non-critical", and "non-critical" before bare "critical".
+func selEventColor(direction, event string) string {
+	dir := strings.ToLower(strings.TrimSpace(direction))
+	ev := strings.ToLower(event)
+
+	// Deasserted = condition has cleared → green.
+	if dir == "deasserted" {
+		return "#859900" // Solarized green
+	}
+
+	if strings.Contains(ev, "non-recoverable") {
+		return "#DC322F" // Solarized red — worst case
+	}
+	if strings.Contains(ev, "non-critical") {
+		return "#CB4B16" // Solarized orange
+	}
+	if strings.Contains(ev, "critical") ||
+		strings.Contains(ev, "ierr") ||
+		strings.Contains(ev, "failure") ||
+		strings.Contains(ev, "fatal") {
+		return "#DC322F" // Solarized red
+	}
+	if strings.Contains(ev, "warning") ||
+		strings.Contains(ev, "degraded") ||
+		strings.Contains(ev, "correctable") {
+		return "#B58900" // Solarized yellow
+	}
+	if strings.Contains(ev, "ok") ||
+		strings.Contains(ev, "working") ||
+		strings.Contains(ev, "presence") ||
+		strings.Contains(ev, "s0/g0") ||
+		strings.Contains(ev, "power on") {
+		return "#859900" // Solarized green
+	}
+
+	return "#2AA198" // Solarized cyan — informational default
 }

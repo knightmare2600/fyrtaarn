@@ -4,29 +4,31 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/knightmare2600/fyrtaarn/internal/config"
 	"github.com/knightmare2600/fyrtaarn/internal/discovery"
 	"github.com/knightmare2600/fyrtaarn/internal/ipmi"
 	"github.com/knightmare2600/fyrtaarn/internal/misc"
+	"github.com/knightmare2600/fyrtaarn/internal/redfish"
+	"github.com/knightmare2600/fyrtaarn/internal/session"
+	"github.com/knightmare2600/fyrtaarn/internal/util"
 )
 
 type screen int
 
 const (
-	screenMenu screen = iota
-	screenResults
-	screenLogin
-	screenCIDR
+	screenResults screen = iota
 	screenMCInfo
 	screenAbout
 	screenSensor
 	screenSEL
-	screenPower
+	screenFRU
 )
 
 /* ---------------- MESSAGES ---------------- */
@@ -53,7 +55,23 @@ type selMsg struct {
 	Err     error
 }
 
+type fruMsg struct {
+	Entries []ipmi.FRUEntry
+	Err     error
+}
+
 type powerMsg struct {
+	Action string
+	Err    error
+}
+
+type eggTickMsg struct{}
+
+type solMsg struct {
+	Err error
+}
+
+type vmMsg struct {
 	Action string
 	Err    error
 }
@@ -61,8 +79,9 @@ type powerMsg struct {
 /* ---------------- APP ---------------- */
 
 type App struct {
-	width  int
-	height int
+	width    int
+	height   int
+	contentH int
 
 	status   string
 	scanning bool
@@ -72,18 +91,13 @@ type App struct {
 
 	currentScreen screen
 
-	menuItems []string
-	selected  int
+	menuBar      MenuBar
+	activeDialog *Dialog
 
-	cidrInput textinput.Model
-
-	usernameInput textinput.Model
-	passwordInput textinput.Model
-
-	username string
-	password string
-
-	loginFocus int // 0 = user, 1 = pass
+	username   string
+	password   string
+	lastSubnet string
+	lastPorts  string
 
 	mcInfo  *ipmi.MCInfo
 	lanInfo *ipmi.LANInfo
@@ -98,12 +112,15 @@ type App struct {
 	spinner     spinner.Model
 	ipmiLoading bool
 
-	sensors   []ipmi.SDREntry
+	sensors    []ipmi.SDREntry
 	selEntries []ipmi.SELEntry
+	fru        []ipmi.FRUEntry
 	sdrOffset  int
 	selOffset  int
+	fruOffset  int
 
-	powerAction string // pending power command: "on", "off", "reset", "soft"
+	eggOffset    int
+	sessionCache *session.Cache
 }
 
 /* ---------------- INIT ---------------- */
@@ -113,43 +130,55 @@ func (a *App) Init() tea.Cmd {
 }
 
 func NewApp() *App {
-
 	sp := spinner.New()
 	sp.Spinner = spinner.MiniDot
 
-	cidr := textinput.New()
-	cidr.Placeholder = "192.168.139.0/24"
-	cidr.SetValue("192.168.139.0/24")
-
-	user := textinput.New()
-	user.Placeholder = "Username"
-
-	pass := textinput.New()
-	pass.Placeholder = "Password"
-	pass.EchoMode = textinput.EchoPassword
-	pass.EchoCharacter = '•'
+	cfg := config.Load()
+	if cfg.Theme != "" {
+		SetTheme(cfg.Theme)
+	}
+	lastSubnet := cfg.LastSubnet
+	if lastSubnet == "" {
+		lastSubnet = "192.168.0.0/24"
+	}
 
 	return &App{
-		status:        "Ready",
-		currentScreen: screenMenu,
-		menuItems:     []string{"Scan", "About", "Quit"},
+		status:        "Ready — press F9 for menu",
+		currentScreen: screenResults,
+		menuBar:       NewMenuBar(),
 		spinner:       sp,
-		cidrInput:     cidr,
-		usernameInput: user,
-		passwordInput: pass,
+		sessionCache:  session.NewCache(),
+		lastSubnet:    lastSubnet,
+		lastPorts:     cfg.LastPorts,
 	}
 }
 
 /* ---------------- COMMANDS ---------------- */
 
-func runScanCmd(subnet string) tea.Cmd {
+func runScanCmd(subnet string, profile discovery.ScanProfile, customPorts string) tea.Cmd {
 	return func() tea.Msg {
-		results, err := discovery.RunScan(subnet)
-		return scanFinishedMsg{Results: results, Err: err}
+		results, err := discovery.RunScan(subnet, profile, customPorts)
+		if err != nil {
+			return scanFinishedMsg{Err: err}
+		}
+		results = discovery.EnrichResults(results)
+		return scanFinishedMsg{Results: results}
 	}
 }
 
-// runMCInfo fetches mc info, LAN info, and chassis status concurrently.
+func runVMAction(host, isoURL, user, pass, action string) tea.Cmd {
+	return func() tea.Msg {
+		var err error
+		switch action {
+		case "mount":
+			err = redfish.InsertMedia(host, isoURL, user, pass)
+		case "eject":
+			err = redfish.EjectMedia(host, user, pass)
+		}
+		return vmMsg{Action: action, Err: err}
+	}
+}
+
 func runMCInfo(host, user, pass string) tea.Cmd {
 	return func() tea.Msg {
 		var (
@@ -199,6 +228,13 @@ func runGetSEL(host, user, pass string) tea.Cmd {
 	}
 }
 
+func runGetFRU(host, user, pass string) tea.Cmd {
+	return func() tea.Msg {
+		entries, err := ipmi.GetFRU(host, user, pass)
+		return fruMsg{Entries: entries, Err: err}
+	}
+}
+
 func runPowerAction(host, user, pass, action string) tea.Cmd {
 	return func() tea.Msg {
 		var err error
@@ -214,6 +250,12 @@ func runPowerAction(host, user, pass, action string) tea.Cmd {
 		}
 		return powerMsg{Action: action, Err: err}
 	}
+}
+
+func eggTick() tea.Cmd {
+	return tea.Tick(200*time.Millisecond, func(time.Time) tea.Msg {
+		return eggTickMsg{}
+	})
 }
 
 /* ---------------- UPDATE ---------------- */
@@ -235,6 +277,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case eggTickMsg:
+		if misc.GlobalEgg.Active {
+			a.eggOffset++
+			return a, eggTick()
+		}
+		return a, nil
+
 	case scanFinishedMsg:
 		a.scanning = false
 		if msg.Err != nil {
@@ -250,8 +299,16 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.ipmiLoading = false
 		if msg.Err != nil {
 			a.status = msg.Err.Error()
+			// Clear bad credentials so the next Enter prompts again.
+			if len(a.results) > 0 {
+				a.sessionCache.Delete(a.results[a.selectedHost].IP)
+			}
 			a.currentScreen = screenResults
 			return a, nil
+		}
+		// Cache successful credentials for this host.
+		if len(a.results) > 0 {
+			a.sessionCache.Set(a.results[a.selectedHost].IP, a.username, a.password)
 		}
 		a.mcInfo = msg.Info
 		a.lanInfo = msg.LAN
@@ -278,7 +335,6 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.status = "SEL error: " + msg.Err.Error()
 			return a, nil
 		}
-		// Reverse so newest events appear first.
 		entries := msg.Entries
 		for i, j := 0, len(entries)-1; i < j; i, j = i+1, j-1 {
 			entries[i], entries[j] = entries[j], entries[i]
@@ -287,6 +343,18 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.selOffset = 0
 		a.currentScreen = screenSEL
 		a.status = fmt.Sprintf("%d events", len(a.selEntries))
+		return a, nil
+
+	case fruMsg:
+		a.ipmiLoading = false
+		if msg.Err != nil {
+			a.status = "FRU error: " + msg.Err.Error()
+			return a, nil
+		}
+		a.fru = msg.Entries
+		a.fruOffset = 0
+		a.currentScreen = screenFRU
+		a.status = fmt.Sprintf("%d FRU fields", len(a.fru))
 		return a, nil
 
 	case powerMsg:
@@ -299,50 +367,93 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.currentScreen = screenMCInfo
 		return a, nil
 
+	case solMsg:
+		// SOL session ended — ipmitool has exited and the TUI is restored.
+		if msg.Err != nil {
+			a.status = "SOL ended: " + msg.Err.Error()
+		} else {
+			a.status = "SOL session ended"
+		}
+		a.currentScreen = screenMCInfo
+		return a, nil
+
+	case vmMsg:
+		a.ipmiLoading = false
+		if msg.Err != nil {
+			a.status = "Virtual media error: " + msg.Err.Error()
+		} else {
+			if msg.Action == "eject" {
+				a.status = "Virtual media ejected"
+			} else {
+				a.status = "ISO mounted via Redfish"
+			}
+		}
+		a.currentScreen = screenMCInfo
+		return a, nil
+
 	case tea.KeyMsg:
 
-		// Always allow quit.
 		if msg.String() == "ctrl+c" {
 			return a, tea.Quit
 		}
 
-		// Block all other input during async operations.
 		if a.scanning || a.ipmiLoading {
 			return a, nil
 		}
 
-		// Easter egg.
 		r := []rune(msg.String())
 		if len(r) > 0 && misc.CheckEggKey(r[0]) {
+			if misc.GlobalEgg.Active {
+				misc.ResetEgg()
+				return a, nil
+			}
 			misc.TriggerEgg()
-			a.status = "Egg activated"
+			a.eggOffset = 0
+			return a, eggTick()
 		}
 
-		switch msg.String() {
-		case "f2":
+		if msg.String() == "f2" {
 			a.CycleTheme()
+			return a, nil
 		}
 
+		// Menu bar takes priority: F9 or when already active.
+		if msg.String() == "f9" || a.menuBar.active {
+			action, consumed := a.menuBar.Update(msg.String())
+			if action != "" {
+				return a.handleMenuAction(action)
+			}
+			if consumed {
+				return a, nil
+			}
+		}
+
+		// Dialog routing.
+		if a.activeDialog != nil {
+			action, consumed, cmd := a.activeDialog.Update(msg)
+			if action != "" {
+				return a.handleDialogAction(action)
+			}
+			if consumed {
+				return a, cmd
+			}
+		}
+
+		// Screen-specific handlers.
 		switch a.currentScreen {
-		case screenMenu:
-			return a.updateMenu(msg)
-		case screenCIDR:
-			return a.updateCIDR(msg)
 		case screenResults:
 			return a.updateResults(msg)
-		case screenLogin:
-			return a.updateLogin(msg)
 		case screenMCInfo:
 			return a.updateMCInfo(msg)
 		case screenSensor:
 			return a.updateSensor(msg)
 		case screenSEL:
 			return a.updateSEL(msg)
-		case screenPower:
-			return a.updatePower(msg)
+		case screenFRU:
+			return a.updateFRU(msg)
 		case screenAbout:
 			if msg.String() == "esc" || msg.String() == "q" {
-				a.currentScreen = screenMenu
+				a.currentScreen = screenResults
 			}
 		}
 	}
@@ -350,70 +461,126 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
-/* ---------------- MENU ---------------- */
+/* ---------------- MENU ACTIONS ---------------- */
 
-func (a *App) updateMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-
-	switch msg.String() {
-
-	case "q", "ctrl+c":
+func (a *App) handleMenuAction(action string) (tea.Model, tea.Cmd) {
+	switch {
+	case action == "quit":
 		return a, tea.Quit
+	case action == "new-scan":
+		a.activeDialog = NewScanDialog(a.lastSubnet, util.IsRoot(), a.lastPorts)
+		return a, textinput.Blink
+	case action == "about":
+		a.currentScreen = screenAbout
+	case strings.HasPrefix(action, "theme:"):
+		name := strings.TrimPrefix(action, "theme:")
+		SetTheme(name)
+		a.status = "Theme: " + name
+		_ = config.Save(config.Config{Theme: name, LastSubnet: a.lastSubnet})
+	}
+	return a, nil
+}
 
-	case "up", "k":
-		if a.selected > 0 {
-			a.selected--
-		}
+/* ---------------- DIALOG ACTIONS ---------------- */
 
-	case "down", "j":
-		if a.selected < len(a.menuItems)-1 {
-			a.selected++
-		}
+func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
+	switch action {
 
-	case "enter":
-		switch a.menuItems[a.selected] {
-		case "Scan":
-			a.currentScreen = screenCIDR
-			a.cidrInput.Focus()
-		case "About":
-			a.currentScreen = screenAbout
-		case "Quit":
-			return a, tea.Quit
+	case "cancel":
+		a.activeDialog = nil
+		return a, nil
+
+	case "scan-quick", "scan-standard", "scan-deep", "scan-custom":
+		dlg := a.activeDialog
+		a.activeDialog = nil
+		subnet := dlg.InputValue(0)
+		if subnet == "" {
+			subnet = a.lastSubnet
 		}
+		customPorts := dlg.InputValue(1)
+		profile := discovery.ScanProfile(strings.TrimPrefix(action, "scan-"))
+		a.lastSubnet = subnet
+		if action == "scan-custom" && customPorts != "" {
+			a.lastPorts = customPorts
+		}
+		_ = config.Save(config.Config{
+			Theme:      CurrentTheme.Name,
+			LastSubnet: subnet,
+			LastPorts:  a.lastPorts,
+		})
+		a.scanning = true
+		a.status = fmt.Sprintf("Scanning %s (%s profile)", subnet, profile)
+		return a, tea.Batch(a.spinner.Tick, runScanCmd(subnet, profile, customPorts))
+
+	case "connect":
+		dlg := a.activeDialog
+		a.activeDialog = nil
+		a.username = dlg.InputValue(0)
+		a.password = dlg.InputValue(1)
+		if len(a.results) == 0 {
+			a.status = "No host selected"
+			return a, nil
+		}
+		host := a.results[a.selectedHost]
+		a.status = "Enumerating " + host.IP
+		a.ipmiLoading = true
+		return a, tea.Batch(a.spinner.Tick, runMCInfo(host.IP, a.username, a.password))
+
+	case "on", "off", "soft", "reset":
+		a.activeDialog = nil
+		if len(a.results) == 0 {
+			return a, nil
+		}
+		host := a.results[a.selectedHost].IP
+		a.ipmiLoading = true
+		a.status = fmt.Sprintf("Sending power %s to %s", action, host)
+		return a, tea.Batch(a.spinner.Tick, runPowerAction(host, a.username, a.password, action))
+
+	case "vm-mount":
+		dlg := a.activeDialog
+		a.activeDialog = nil
+		isoURL := dlg.InputValue(0)
+		if isoURL == "" {
+			a.status = "ISO URL required"
+			return a, nil
+		}
+		if len(a.results) == 0 {
+			return a, nil
+		}
+		host := a.results[a.selectedHost]
+		if !host.HasRedfish {
+			a.status = "Virtual media requires Redfish — host does not advertise it"
+			return a, nil
+		}
+		a.ipmiLoading = true
+		a.status = fmt.Sprintf("Mounting %s on %s", isoURL, host.IP)
+		return a, tea.Batch(a.spinner.Tick, runVMAction(host.IP, isoURL, a.username, a.password, "mount"))
+
+	case "vm-eject":
+		a.activeDialog = nil
+		if len(a.results) == 0 {
+			return a, nil
+		}
+		host := a.results[a.selectedHost]
+		if !host.HasRedfish {
+			a.status = "Virtual media requires Redfish — host does not advertise it"
+			return a, nil
+		}
+		a.ipmiLoading = true
+		a.status = "Ejecting virtual media from " + host.IP
+		return a, tea.Batch(a.spinner.Tick, runVMAction(host.IP, "", a.username, a.password, "eject"))
 	}
 
 	return a, nil
 }
 
-/* ---------------- CIDR ---------------- */
-
-func (a *App) updateCIDR(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-
-	switch msg.String() {
-
-	case "esc":
-		a.currentScreen = screenMenu
-		return a, nil
-
-	case "enter":
-		subnet := a.cidrInput.Value()
-		a.scanning = true
-		a.status = "Scanning " + subnet
-		return a, tea.Batch(a.spinner.Tick, runScanCmd(subnet))
-	}
-
-	var cmd tea.Cmd
-	a.cidrInput, cmd = a.cidrInput.Update(msg)
-	return a, cmd
-}
-
 /* ---------------- RESULTS ---------------- */
 
 func (a *App) updateResults(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-
 	switch msg.String() {
 
-	case "esc", "q":
-		a.currentScreen = screenMenu
+	case "q":
+		return a, tea.Quit
 
 	case "up", "k":
 		if a.selectedHost > 0 {
@@ -429,66 +596,28 @@ func (a *App) updateResults(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.treeExpanded = !a.treeExpanded
 
 	case "enter":
-		a.currentScreen = screenLogin
-		a.loginFocus = 0
-		a.usernameInput.Focus()
-		a.passwordInput.Blur()
+		if len(a.results) == 0 {
+			return a, nil
+		}
+		host := a.results[a.selectedHost]
+		// Use cached credentials if we have a previous successful session.
+		if user, pass, ok := a.sessionCache.Get(host.IP); ok {
+			a.username = user
+			a.password = pass
+			a.status = "Reconnecting to " + host.IP
+			a.ipmiLoading = true
+			return a, tea.Batch(a.spinner.Tick, runMCInfo(host.IP, user, pass))
+		}
+		a.activeDialog = NewLoginDialog(a.username)
 		return a, textinput.Blink
 	}
 
 	return a, nil
 }
 
-/* ---------------- LOGIN ---------------- */
-
-func (a *App) updateLogin(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-
-	switch msg.String() {
-
-	case "esc":
-		a.currentScreen = screenResults
-		a.usernameInput.Blur()
-		a.passwordInput.Blur()
-		return a, nil
-
-	case "tab":
-		a.loginFocus = (a.loginFocus + 1) % 2
-		return a, nil
-
-	case "enter":
-		a.username = a.usernameInput.Value()
-		a.password = a.passwordInput.Value()
-
-		if len(a.results) == 0 {
-			a.status = "No host selected"
-			return a, nil
-		}
-
-		host := a.results[a.selectedHost]
-		a.status = "Enumerating " + host.IP
-		a.ipmiLoading = true
-		return a, tea.Batch(a.spinner.Tick, runMCInfo(host.IP, a.username, a.password))
-	}
-
-	var cmd tea.Cmd
-
-	if a.loginFocus == 0 {
-		a.usernameInput.Focus()
-		a.passwordInput.Blur()
-		a.usernameInput, cmd = a.usernameInput.Update(msg)
-	} else {
-		a.passwordInput.Focus()
-		a.usernameInput.Blur()
-		a.passwordInput, cmd = a.passwordInput.Update(msg)
-	}
-
-	return a, cmd
-}
-
 /* ---------------- MC INFO ---------------- */
 
 func (a *App) updateMCInfo(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-
 	switch msg.String() {
 
 	case "esc", "q":
@@ -513,10 +642,44 @@ func (a *App) updateMCInfo(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.status = "Loading event log from " + host
 		return a, tea.Batch(a.spinner.Tick, runGetSEL(host, a.username, a.password))
 
+	case "f":
+		if len(a.results) == 0 {
+			return a, nil
+		}
+		host := a.results[a.selectedHost].IP
+		a.ipmiLoading = true
+		a.status = "Loading FRU data from " + host
+		return a, tea.Batch(a.spinner.Tick, runGetFRU(host, a.username, a.password))
+
 	case "p":
-		a.powerAction = ""
-		a.currentScreen = screenPower
+		if len(a.results) == 0 {
+			return a, nil
+		}
+		host := a.results[a.selectedHost].IP
+		currentState := "Unknown"
+		if a.chassis != nil {
+			if a.chassis.PowerOn {
+				currentState = "On"
+			} else {
+				currentState = "Off"
+			}
+		}
+		a.activeDialog = NewPowerDialog(host, currentState)
 		return a, nil
+
+	case "o":
+		if len(a.results) == 0 {
+			return a, nil
+		}
+		host := a.results[a.selectedHost].IP
+		cmd := ipmi.SOLCmd(host, a.username, a.password)
+		return a, tea.ExecProcess(cmd, func(err error) tea.Msg {
+			return solMsg{Err: err}
+		})
+
+	case "v":
+		a.activeDialog = NewVirtualMediaDialog()
+		return a, textinput.Blink
 	}
 
 	return a, nil
@@ -525,10 +688,9 @@ func (a *App) updateMCInfo(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 /* ---------------- SENSORS ---------------- */
 
 func (a *App) updateSensor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-
-	visibleLines := a.height - 8
+	visibleLines := a.contentH - 6
 	if visibleLines < 1 {
-		visibleLines = 10
+		visibleLines = 5
 	}
 
 	maxOffset := len(a.sensors) - visibleLines
@@ -555,10 +717,9 @@ func (a *App) updateSensor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 /* ---------------- SEL ---------------- */
 
 func (a *App) updateSEL(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-
-	visibleLines := a.height - 8
+	visibleLines := a.contentH - 6
 	if visibleLines < 1 {
-		visibleLines = 10
+		visibleLines = 5
 	}
 
 	maxOffset := len(a.selEntries) - visibleLines
@@ -582,51 +743,30 @@ func (a *App) updateSEL(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
-/* ---------------- POWER CONTROL ---------------- */
+/* ---------------- FRU ---------------- */
 
-func (a *App) updatePower(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (a *App) updateFRU(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	visibleLines := a.contentH - 6
+	if visibleLines < 1 {
+		visibleLines = 5
+	}
+
+	maxOffset := len(a.fru) - visibleLines
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
 
 	switch msg.String() {
-
-	case "esc":
-		if a.powerAction != "" {
-			a.powerAction = ""
-			return a, nil
-		}
+	case "esc", "q":
 		a.currentScreen = screenMCInfo
-		return a, nil
-	}
-
-	if a.powerAction == "" {
-		// Selecting an action.
-		switch msg.String() {
-		case "o", "O":
-			a.powerAction = "on"
-		case "f", "F":
-			a.powerAction = "off"
-		case "s", "S":
-			a.powerAction = "soft"
-		case "r", "R":
-			a.powerAction = "reset"
+	case "up", "k":
+		if a.fruOffset > 0 {
+			a.fruOffset--
 		}
-		return a, nil
-	}
-
-	// Confirming an action.
-	switch msg.String() {
-	case "y", "Y":
-		if len(a.results) == 0 {
-			a.powerAction = ""
-			return a, nil
+	case "down", "j":
+		if a.fruOffset < maxOffset {
+			a.fruOffset++
 		}
-		host := a.results[a.selectedHost].IP
-		action := a.powerAction
-		a.powerAction = ""
-		a.ipmiLoading = true
-		a.status = fmt.Sprintf("Sending power %s to %s", action, host)
-		return a, tea.Batch(a.spinner.Tick, runPowerAction(host, a.username, a.password, action))
-	case "n", "N":
-		a.powerAction = ""
 	}
 
 	return a, nil
@@ -651,73 +791,107 @@ func (a *App) CycleTheme() {
 	next := themes[(currentIdx+1)%len(themes)]
 	SetTheme(next)
 	a.status = fmt.Sprintf("Theme: %s", next)
+	_ = config.Save(config.Config{Theme: next, LastSubnet: a.lastSubnet})
 }
 
 /* ---------------- VIEW ---------------- */
 
 func (a *App) View() string {
-	var content string
+	if a.width == 0 || a.height == 0 {
+		return "Initialising..."
+	}
 
-	if a.ipmiLoading {
-		content = a.renderLoading()
-	} else {
-		switch a.currentScreen {
-		case screenMenu:
-			content = a.renderMenu()
-		case screenCIDR:
-			content = a.renderCIDRScreen()
-		case screenResults:
-			content = a.renderResults()
-		case screenLogin:
-			content = renderLoginModal(a)
-		case screenMCInfo:
-			content = a.renderMCInfo()
-		case screenSensor:
-			content = a.renderSensors()
-		case screenSEL:
-			content = a.renderSEL()
-		case screenPower:
-			content = a.renderPower()
-		case screenAbout:
-			content = a.aboutView()
-		default:
-			content = a.status
+	topBar := a.menuBar.RenderBar(a.width)
+
+	dropdown := ""
+	dropLines := 0
+	if a.menuBar.IsOpen() {
+		dropdown = a.menuBar.RenderDropdown()
+		if dropdown != "" {
+			dropLines = strings.Count(dropdown, "\n") + 1
 		}
 	}
 
-	return a.applyLayout(content)
+	a.contentH = a.height - 2 - dropLines
+	if a.contentH < 1 {
+		a.contentH = 1
+	}
+
+	var content string
+	if a.activeDialog != nil {
+		// lipgloss.Place already fills the full viewport with Background.
+		content = a.activeDialog.Render(a.width, a.contentH)
+	} else {
+		if a.scanning || a.ipmiLoading {
+			content = a.renderLoading()
+		} else {
+			switch a.currentScreen {
+			case screenResults:
+				content = a.renderResults()
+			case screenMCInfo:
+				content = a.renderMCInfo()
+			case screenSensor:
+				content = a.renderSensors()
+			case screenSEL:
+				content = a.renderSEL()
+			case screenFRU:
+				content = a.renderFRU()
+			case screenAbout:
+				content = a.aboutView()
+			default:
+				content = a.status
+			}
+		}
+
+		// Pad to exactly contentH lines first, then fill each line to the full
+		// terminal width with the theme background. This ensures bright-background
+		// themes (Pan Am, NS, IRN-BRU) show their colour across the whole window
+		// rather than bleeding through as the terminal's default black.
+		contentLines := strings.Count(content, "\n") + 1
+		if contentLines < a.contentH {
+			content += strings.Repeat("\n", a.contentH-contentLines)
+		}
+		lineBg := lipgloss.NewStyle().
+			Background(lipgloss.Color(CurrentTheme.Background)).
+			Width(a.width)
+		lines := strings.Split(content, "\n")
+		for i, line := range lines {
+			lines[i] = lineBg.Render(line)
+		}
+		content = strings.Join(lines, "\n")
+	}
+
+	right := fmt.Sprintf("[F9] Menu  Theme: %s", CurrentTheme.Name)
+	var left string
+	switch {
+	case a.scanning:
+		left = a.spinner.View() + " Scanning..."
+	case a.ipmiLoading:
+		left = a.spinner.View() + " Querying BMC..."
+	case misc.GlobalEgg.Active:
+		rw := len([]rune(right)) + 2
+		maxScroll := a.width - rw
+		if maxScroll < 10 {
+			maxScroll = 10
+		}
+		left = a.eggScrollText(maxScroll)
+	default:
+		left = a.screenStatusHint()
+	}
+	bar := StatusBar(a.width, left, right)
+
+	var out strings.Builder
+	out.WriteString(topBar + "\n")
+	if dropdown != "" {
+		out.WriteString(dropdown + "\n")
+	}
+	out.WriteString(content + "\n")
+	out.WriteString(bar)
+
+	return out.String()
 }
 
 /* ---------------- RENDERING HELPERS ---------------- */
-
-func (a *App) renderMenu() string {
-	title := HeaderStyle().Render("FYRTAARN")
-
-	var itemLines []string
-	for i, item := range a.menuItems {
-		itemLines = append(itemLines, MenuStyle(i == a.selected).Render("  "+item+"  "))
-	}
-
-	content := lipgloss.JoinVertical(lipgloss.Left,
-		title,
-		"BMC/IPMI Management Toolkit",
-		"",
-		lipgloss.JoinVertical(lipgloss.Left, itemLines...),
-		"",
-		"[↑↓] Navigate  [Enter] Select  [Q] Quit  [F2] Theme",
-	)
-
-	return BorderStyle().Render(content)
-}
-
-func (a *App) renderCIDRScreen() string {
-	var b strings.Builder
-	b.WriteString(HeaderStyle().Render("SUBNET SCAN") + "\n\n")
-	b.WriteString("Enter CIDR subnet to scan:\n\n")
-	b.WriteString(a.cidrInput.View())
-	b.WriteString("\n\n[Enter] Start Scan  [Esc] Cancel")
-	return b.String()
-}
 
 func (a *App) renderResults() string {
 	var b strings.Builder
@@ -725,12 +899,12 @@ func (a *App) renderResults() string {
 	b.WriteString(HeaderStyle().Render("DISCOVERY TREE") + "\n\n")
 
 	if len(a.results) == 0 {
-		b.WriteString("No hosts discovered.\n")
+		b.WriteString("  No hosts discovered.\n\n")
+		b.WriteString("  Use [F9] > File > New Scan to discover BMC hosts.")
 		return b.String()
 	}
 
 	for i, h := range a.results {
-
 		isLast := i == len(a.results)-1
 		selected := i == a.selectedHost
 
@@ -739,7 +913,19 @@ func (a *App) renderResults() string {
 			connector = "└─"
 		}
 
-		line := fmt.Sprintf("  %s %s (score=%d)", connector, h.IP, h.Confidence)
+		// Lighthouse glyph marks confirmed BMC hosts.
+		glyph := "   "
+		if h.IsBMC {
+			glyph = "⛯  "
+		}
+
+		// Redfish tag appended inline so it's visible without expanding.
+		rfTag := ""
+		if h.HasRedfish {
+			rfTag = " [RF]"
+		}
+
+		line := fmt.Sprintf("  %s %s%s%s", connector, glyph, h.IP, rfTag)
 
 		if selected {
 			b.WriteString(MenuStyle(true).Render(line) + "\n")
@@ -748,41 +934,26 @@ func (a *App) renderResults() string {
 		}
 
 		if selected && a.treeExpanded {
-			b.WriteString(fmt.Sprintf("     ├─ vendor: %s\n", h.Vendor))
-			b.WriteString(fmt.Sprintf("     ├─ hostname: %s\n", h.Hostname))
-			b.WriteString(fmt.Sprintf("     └─ bmc candidate: %t\n", h.IsBMC))
+			b.WriteString(fmt.Sprintf("     ├─ vendor:     %s\n", h.Vendor))
+			b.WriteString(fmt.Sprintf("     ├─ hostname:   %s\n", h.Hostname))
+			b.WriteString(fmt.Sprintf("     ├─ confidence: %d\n", h.Confidence))
+			if h.IPMIScript != "" {
+				first := strings.SplitN(strings.TrimSpace(h.IPMIScript), "\n", 2)[0]
+				b.WriteString(fmt.Sprintf("     ├─ ipmi:       %s\n", strings.TrimSpace(first)))
+			}
+			if h.HasRedfish {
+				b.WriteString(fmt.Sprintf("     ├─ redfish:    v%s\n", h.RedfishVersion))
+				if h.RedfishManufacturer != "" || h.RedfishModel != "" {
+					hw := strings.TrimSpace(h.RedfishManufacturer + " " + h.RedfishModel)
+					b.WriteString(fmt.Sprintf("     ├─ hardware:   %s\n", hw))
+				}
+			}
+			_, _, cached := a.sessionCache.Get(h.IP)
+			b.WriteString(fmt.Sprintf("     └─ session:    %s\n", boolCached(cached)))
 		}
 	}
 
-	b.WriteString("\n[TAB] Expand/Collapse  [ENTER] Login  [ESC] Back")
 	return b.String()
-}
-
-func renderLoginModal(a *App) string {
-	var b strings.Builder
-
-	b.WriteString("BMC LOGIN\n\n")
-
-	if a.loginFocus == 0 {
-		b.WriteString("▶ ")
-	} else {
-		b.WriteString("  ")
-	}
-	b.WriteString("Username:\n")
-	b.WriteString(a.usernameInput.View())
-	b.WriteString("\n\n")
-
-	if a.loginFocus == 1 {
-		b.WriteString("▶ ")
-	} else {
-		b.WriteString("  ")
-	}
-	b.WriteString("Password:\n")
-	b.WriteString(a.passwordInput.View())
-
-	b.WriteString("\n\n[Tab] Switch  [Enter] Login  [Esc] Cancel")
-
-	return modal(80, 20, b.String())
 }
 
 func (a *App) aboutView() string {
@@ -792,43 +963,101 @@ func (a *App) aboutView() string {
 	b.WriteString(fmt.Sprintf("  Version:     %s\n", a.Version))
 	b.WriteString(fmt.Sprintf("  Commit:      %s\n", a.Commit))
 	b.WriteString(fmt.Sprintf("  Build Date:  %s\n\n", a.BuildDate))
-	b.WriteString("  Dedicated to the work of Dan Kaminsky\n\n")
-
-	if misc.GlobalEgg.Active {
-		b.WriteString("\n")
-		for _, line := range strings.Split(misc.GlobalEgg.Message, "\n") {
-			b.WriteString("  " + line + "\n")
-		}
-		b.WriteString("\n")
-	}
-
-	b.WriteString("  [ESC] Back")
+	b.WriteString("  Dedicated to the work of Dan Kaminsky\n")
+	b.WriteString("\n  [ESC] Back")
 	return b.String()
 }
 
-// applyLayout pads content to a consistent terminal height and appends the
-// status bar, preventing the flickering caused by variable-height frames.
-func (a *App) applyLayout(content string) string {
-	left := a.status
-	if a.scanning {
-		left = a.spinner.View() + " Scanning..."
-	} else if a.ipmiLoading {
-		left = a.spinner.View() + " Querying BMC..."
+// eggScrollText returns a right-to-left scrolling window of the egg message
+// for display in the status bar.
+func (a *App) eggScrollText(maxWidth int) string {
+	raw := strings.ReplaceAll(misc.GlobalEgg.Message, "\n", "  ")
+	raw += "        "
+
+	runes := []rune(raw)
+	n := len(runes)
+	if n == 0 || maxWidth <= 0 {
+		return ""
 	}
 
-	if a.width == 0 {
-		return content
+	offset := a.eggOffset % n
+
+	var sb strings.Builder
+	for i := 0; i < maxWidth; i++ {
+		sb.WriteRune(runes[(offset+i)%n])
+	}
+	return sb.String()
+}
+
+func boolCached(v bool) string {
+	if v {
+		return "cached"
+	}
+	return "not cached"
+}
+
+// screenStatusHint returns a context-sensitive hint line for the status bar.
+// Scrollable screens include the current pagination range so the user always
+// knows where they are without a separate footer line in the content area.
+func (a *App) screenStatusHint() string {
+	if a.activeDialog != nil {
+		return "[Tab] Next  [Enter] Select  [Esc] Cancel"
 	}
 
-	right := fmt.Sprintf("[F2] %s", CurrentTheme.Name)
-	bar := StatusBar(a.width, left, right)
-
-	// Pad to fill the terminal so the frame height never changes.
-	lines := strings.Count(content, "\n")
-	targetLines := a.height - 1
-	if targetLines > lines {
-		content += strings.Repeat("\n", targetLines-lines)
+	visibleLines := a.contentH - 6
+	if visibleLines < 1 {
+		visibleLines = 5
 	}
 
-	return content + bar
+	switch a.currentScreen {
+	case screenResults:
+		if len(a.results) == 0 {
+			return a.status
+		}
+		return "[↑↓/jk] Navigate  [Tab] Expand  [Enter] Connect  [F9] Menu  [Q] Quit"
+
+	case screenMCInfo:
+		return "[S] Sensors  [L] Event Log  [F] FRU  [P] Power  [O] SOL  [V] VM  [ESC] Back"
+
+	case screenSensor:
+		total := len(a.sensors)
+		if total == 0 {
+			return "[ESC] Back"
+		}
+		end := a.sdrOffset + visibleLines
+		if end > total {
+			end = total
+		}
+		return fmt.Sprintf("Showing %d–%d of %d  [↑/k] Up  [↓/j] Down  [ESC] Back",
+			a.sdrOffset+1, end, total)
+
+	case screenSEL:
+		total := len(a.selEntries)
+		if total == 0 {
+			return "[ESC] Back"
+		}
+		end := a.selOffset + visibleLines
+		if end > total {
+			end = total
+		}
+		return fmt.Sprintf("Showing %d–%d of %d (newest first)  [↑/k] Up  [↓/j] Down  [ESC] Back",
+			a.selOffset+1, end, total)
+
+	case screenFRU:
+		total := len(a.fru)
+		if total == 0 {
+			return "[ESC] Back"
+		}
+		end := a.fruOffset + visibleLines
+		if end > total {
+			end = total
+		}
+		return fmt.Sprintf("Showing %d–%d of %d  [↑/k] Up  [↓/j] Down  [ESC] Back",
+			a.fruOffset+1, end, total)
+
+	case screenAbout:
+		return "[ESC] Back"
+	}
+
+	return a.status
 }

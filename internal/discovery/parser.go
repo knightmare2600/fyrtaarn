@@ -3,6 +3,7 @@ package discovery
 import (
 	"encoding/xml"
 	"io"
+	"strings"
 )
 
 type NmapRun struct {
@@ -10,8 +11,9 @@ type NmapRun struct {
 }
 
 type NmapHost struct {
-	Addresses []NmapAddress `xml:"address"`
-	Ports     NmapPorts     `xml:"ports"`
+	Addresses  []NmapAddress  `xml:"address"`
+	Ports      NmapPorts      `xml:"ports"`
+	HostScript NmapHostScript `xml:"hostscript"`
 }
 
 type NmapPorts struct {
@@ -37,6 +39,15 @@ type NmapPortState struct {
 
 type NmapPortService struct {
 	Name string `xml:"name,attr"`
+}
+
+type NmapHostScript struct {
+	Scripts []NmapScript `xml:"script"`
+}
+
+type NmapScript struct {
+	ID     string `xml:"id,attr"`
+	Output string `xml:"output,attr"`
 }
 
 func ParseNmapXML(r io.Reader) ([]HostResult, error) {
@@ -67,7 +78,6 @@ func ParseNmapXML(r io.Reader) ([]HostResult, error) {
 			}
 		}
 
-		// Handle both old and new format
 		var ports []NmapPort
 		if len(host.Ports.Ports) > 0 {
 			ports = host.Ports.Ports
@@ -85,6 +95,16 @@ func ParseNmapXML(r io.Reader) ([]HostResult, error) {
 			result.Ports = append(result.Ports, p)
 
 			scoreHost(&result, p)
+		}
+
+		// Extract ipmi-version NSE script output (root-mode scans only).
+		for _, script := range host.HostScript.Scripts {
+			if script.ID == "ipmi-version" {
+				result.IPMIScript = strings.TrimSpace(script.Output)
+				// Confirmed IPMI response from the host — strong signal.
+				result.Confidence += 200
+				result.IsBMC = true
+			}
 		}
 
 		results = append(results, result)

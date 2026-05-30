@@ -22,8 +22,8 @@ func StatusBar(width int, left, right string) string {
   }
 
   base := lipgloss.NewStyle().
-    Background(lipgloss.Color(CurrentTheme.StatusBar)).
-    Foreground(lipgloss.Color(CurrentTheme.Foreground))
+    Background(lipgloss.Color(CurrentTheme.Chrome)).
+    Foreground(lipgloss.Color(CurrentTheme.ChromeFg))
 
   l := " " + left
   r := right + " "

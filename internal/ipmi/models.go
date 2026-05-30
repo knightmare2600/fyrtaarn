@@ -42,3 +42,9 @@ type SELEntry struct {
   Direction string
 }
 
+type FRUEntry struct {
+  Field    string
+  Value    string
+  IsHeader bool // true for "FRU Device Description" section lines
+}
+

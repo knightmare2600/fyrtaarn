@@ -17,5 +17,11 @@ type HostResult struct {
 	IsBMC      bool
 	Confidence int
 
-	Ports []PortInfo
+	Ports      []PortInfo
+	IPMIScript string // output from nmap ipmi-version NSE script, if run
+
+	HasRedfish          bool
+	RedfishVersion      string
+	RedfishManufacturer string
+	RedfishModel        string
 }
