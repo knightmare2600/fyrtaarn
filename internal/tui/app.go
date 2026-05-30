@@ -94,10 +94,11 @@ type App struct {
 	menuBar      MenuBar
 	activeDialog *Dialog
 
-	username   string
-	password   string
-	lastSubnet string
-	lastPorts  string
+	username      string
+	password      string
+	lastSubnet    string
+	lastPorts     string
+	scanPerformed bool
 
 	mcInfo  *ipmi.MCInfo
 	lanInfo *ipmi.LANInfo
@@ -286,6 +287,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case scanFinishedMsg:
 		a.scanning = false
+		a.scanPerformed = true
 		if msg.Err != nil {
 			a.status = msg.Err.Error()
 			return a, nil
@@ -803,23 +805,21 @@ func (a *App) View() string {
 
 	topBar := a.menuBar.RenderBar(a.width)
 
-	dropdown := ""
-	dropLines := 0
-	if a.menuBar.IsOpen() {
-		dropdown = a.menuBar.RenderDropdown()
-		if dropdown != "" {
-			dropLines = strings.Count(dropdown, "\n") + 1
-		}
-	}
-
-	a.contentH = a.height - 2 - dropLines
+	// Content area fills the full space between the menu bar and the status bar.
+	// The dropdown is overlaid on the first N lines of the content rather than
+	// inserted as extra lines — this prevents it from "eating" screen real estate.
+	a.contentH = a.height - 2
 	if a.contentH < 1 {
 		a.contentH = 1
 	}
 
+	lineBg := lipgloss.NewStyle().
+		Background(lipgloss.Color(CurrentTheme.Background)).
+		Width(a.width)
+
 	var content string
 	if a.activeDialog != nil {
-		// lipgloss.Place already fills the full viewport with Background.
+		// lipgloss.Place fills the full viewport with Background already.
 		content = a.activeDialog.Render(a.width, a.contentH)
 	} else {
 		if a.scanning || a.ipmiLoading {
@@ -843,21 +843,30 @@ func (a *App) View() string {
 			}
 		}
 
-		// Pad to exactly contentH lines first, then fill each line to the full
-		// terminal width with the theme background. This ensures bright-background
-		// themes (Pan Am, NS, IRN-BRU) show their colour across the whole window
-		// rather than bleeding through as the terminal's default black.
-		contentLines := strings.Count(content, "\n") + 1
-		if contentLines < a.contentH {
-			content += strings.Repeat("\n", a.contentH-contentLines)
+		// Pad to contentH lines, then fill each line to the full terminal width
+		// with the theme background so bright themes don't bleed as black.
+		nLines := strings.Count(content, "\n") + 1
+		if nLines < a.contentH {
+			content += strings.Repeat("\n", a.contentH-nLines)
 		}
-		lineBg := lipgloss.NewStyle().
-			Background(lipgloss.Color(CurrentTheme.Background)).
-			Width(a.width)
 		lines := strings.Split(content, "\n")
 		for i, line := range lines {
 			lines[i] = lineBg.Render(line)
 		}
+
+		// Overlay the open dropdown on the top N lines of content. The dropdown
+		// already carries its own left-offset padding from RenderDropdown, so we
+		// just stamp each dropdown line over the corresponding content line.
+		if a.menuBar.IsOpen() {
+			if dd := a.menuBar.RenderDropdown(); dd != "" {
+				for i, ddLine := range strings.Split(dd, "\n") {
+					if i < len(lines) {
+						lines[i] = lineBg.Render(ddLine)
+					}
+				}
+			}
+		}
+
 		content = strings.Join(lines, "\n")
 	}
 
@@ -882,9 +891,6 @@ func (a *App) View() string {
 
 	var out strings.Builder
 	out.WriteString(topBar + "\n")
-	if dropdown != "" {
-		out.WriteString(dropdown + "\n")
-	}
 	out.WriteString(content + "\n")
 	out.WriteString(bar)
 
@@ -1011,8 +1017,11 @@ func (a *App) screenStatusHint() string {
 
 	switch a.currentScreen {
 	case screenResults:
+		if !a.scanPerformed {
+			return "No scan performed — [F9] Menu > File > New Scan"
+		}
 		if len(a.results) == 0 {
-			return a.status
+			return "No hosts found — try a wider subnet or deeper scan profile"
 		}
 		return "[↑↓/jk] Navigate  [Tab] Expand  [Enter] Connect  [F9] Menu  [Q] Quit"
 

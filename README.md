@@ -42,19 +42,21 @@ The name reflects the project's purpose: visibility, remote control, and infrast
 ### Interface
 
 - Bubble Tea TUI with alt-screen mode
-- Multi-theme engine with 12 themes (F2 to cycle; Theme submenu for direct selection)
+- Multi-theme engine with 20 themes (F2 to cycle; Theme submenu for direct selection)
 - Keyboard navigation and mouse support (cell-motion)
 - Menu bar (F9) — File > New Scan / Theme submenu / Exit; Help > About
 - Compact MC-style dropdown menus with submenu navigation
 - Async spinner during all network operations
-- Status bar shows current theme name
-- Config file (`~/.config/fyrtaarn/config.json`) persists theme and last-used subnet
+- Status bar shows context-sensitive keyboard hints per screen with live pagination for scrollable views; shows "No scan performed" before the first scan runs
+- Chrome/content colour split: menu bar and status bar use their own foreground/background pair (`Chrome`/`ChromeFg`) independent of the content area, allowing light-chrome themes (Pan Am, Network SouthEast) to render correctly
+- Config file (`~/.config/fyrtaarn/config.json`) persists theme, last-used subnet, and last-used custom port list
 
 ### Discovery
 
 - Configurable CIDR subnet entry via scan dialog
-- **Scan profiles** — Quick (`-T5`, port 623 only), Standard (`-T4`, ports 623/443/80), Deep (`-T3`, extended port set)
+- **Scan profiles** — Quick (`-T5`, port 623 only), Standard (`-T4`, ports 623/443/80), Deep (`-T3`, extended port set), Custom (free-form port list)
 - Asynchronous nmap execution — TCP connect scan unprivileged; SYN + UDP scan as root
+- nmap privilege detection — scan dialog shows an amber `⚠` warning when running without root; SYN/UDP-dependent profiles degrade gracefully to TCP connect
 - `ipmi-version` NSE script fingerprinting when running as root (bundled with nmap, no extra install)
 - Nmap XML output parsing with heuristic BMC confidence scoring
 - Reverse DNS resolution after scan (async, 2-second per-host timeout)
@@ -84,6 +86,8 @@ The name reflects the project's purpose: visibility, remote control, and infrast
   - Cyan — informational (default)
 - **FRU / hardware inventory** — scrollable `ipmitool fru` output with device section headers
 - **Power control** — on, off, soft shutdown, reset; dialog shows current chassis power state
+- **SOL console** — Serial over LAN via `ipmitool sol activate`; TUI suspends and hands the full terminal to the SOL session; resuming returns to the BMC info screen (`[O]` from BMC Info)
+- **Virtual media** — Redfish ISO mount and eject via `InsertMedia`/`EjectMedia` actions; walks `Managers → VirtualMedia` to find the CD/DVD slot (`[V]` from BMC Info; requires Redfish-capable host)
 
 ### Architecture
 
@@ -98,7 +102,6 @@ The name reflects the project's purpose: visibility, remote control, and infrast
 
 ### Discovery
 
-- Free-form configurable port list (currently profile presets only)
 - Redfish full enumeration beyond detection and basic hardware info
 
 ### Authentication
@@ -109,16 +112,13 @@ The name reflects the project's purpose: visibility, remote control, and infrast
 
 ### Management
 
-- SOL (Serial over LAN) console access
 - User management (`ipmitool user`)
 - Firmware compliance checks
 
 ### Virtual Media
 
-- ISO mounting
 - Floppy image support
 - Remote media redirection
-- Redfish virtual media support
 
 ### Providers
 
@@ -224,6 +224,8 @@ sudo ./dist/fyrtaarn
 | L           | BMC Info       | Load event log (SEL)           |
 | F           | BMC Info       | Load FRU / hardware inventory  |
 | P           | BMC Info       | Power control dialog           |
+| O           | BMC Info       | Open SOL console               |
+| V           | BMC Info       | Virtual media dialog (Redfish) |
 | Esc / Q     | Most screens   | Back / quit                    |
 
 ---
@@ -236,7 +238,7 @@ Currently focused on:
 
 - provider-specific vendor implementations
 - Redfish full enumeration
-- SOL console access
+- user management
 
 ---
 
@@ -306,10 +308,9 @@ For detailed technical writeups and excellent explanations of:
 
 ### Near Term
 
-- free-form configurable port list for scanning
-- SOL console support
-- virtual media groundwork
-- nmap privilege detection — grey out scan options requiring root when running unprivileged
+- Redfish full enumeration (beyond detection and basic hardware info)
+- user management (`ipmitool user list / add / delete / set`)
+- firmware compliance checks
 
 ### Longer Term
 
@@ -324,6 +325,19 @@ For detailed technical writeups and excellent explanations of:
 ---
 
 ## Changelog
+
+### 0.0.5
+
+- Theme engine reworked: `Chrome`/`ChromeFg` colour pair for menu bar and status bar, independent of content area colours — light-chrome themes (Pan Am, Network SouthEast) now render correctly
+- 20 themes total — added class91, dark, db-1980s, gemstones, light, pan-am, twa, viarail-soft; corrected British (red chrome, Prussian blue content) and ScotRail (lighter Saltire blue content, navy chrome, yellow chrome text)
+- Dropdown menus rendered as an overlay on content instead of inserted lines — no longer "gobbles" lines from the content area when open
+- Status bar shows context-sensitive keyboard hints per screen with live pagination for scrollable views
+- Status bar shows "No scan performed" before the first scan; "No hosts found" after a scan returns zero results
+- nmap privilege detection — scan dialog shows amber `⚠` warning when running without root
+- Custom scan profile — free-form port list input in scan dialog; last-used ports persisted to config
+- SOL console (`[O]` from BMC Info) — hands full terminal to `ipmitool sol activate` via `tea.ExecProcess`; returns to TUI on exit
+- Virtual media groundwork (`[V]` from BMC Info) — Redfish ISO mount and eject via `InsertMedia`/`EjectMedia` actions on Redfish-capable hosts
+- Easter egg: `£` accepted as second trigger key alongside `ø`; second press of either key dismisses the scroller and restores the status bar hint
 
 ### 0.0.4
 
