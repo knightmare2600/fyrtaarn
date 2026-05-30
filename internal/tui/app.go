@@ -293,6 +293,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.results = msg.Results
+		a.selectedHost = 0
+		a.treeExpanded = false
 		a.currentScreen = screenResults
 		a.status = fmt.Sprintf("Scan complete — %d hosts found", len(a.results))
 		return a, nil
@@ -909,6 +911,8 @@ func (a *App) renderResults() string {
 		b.WriteString("  Use [F9] > File > New Scan to discover BMC hosts.")
 		return b.String()
 	}
+
+	b.WriteString("  │\n")
 
 	for i, h := range a.results {
 		isLast := i == len(a.results)-1
