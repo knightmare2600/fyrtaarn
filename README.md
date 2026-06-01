@@ -95,14 +95,37 @@ The name reflects the project's purpose: visibility, remote control, and infrast
 - Parallel IPMI queries — mc info, lan print, chassis status fetched concurrently
 - Per-command timeouts — 15 s for single-round-trip commands; 90 s for bulk SDR/SEL reads
 - ipmitool credential string zeroed from memory after each command
+- Structured file logger (`internal/logging`) — level-filtered, RFC3339 timestamps, defaults to discard (opt-in)
+- Live scan streaming — nmap log events surfaced to the status bar while a scan is running; progress bar shown in the loading screen when count data is available
+
+### User Management (backend)
+
+Functions available in `internal/ipmi/users.go` — TUI screen pending:
+
+- `GetUsers` — `ipmitool user list` with parsed privilege levels
+- `EnableUser` / `DisableUser`
+- `SetUserPassword` — password wiped from memory after the call
+- `SetUserName`
+- `SetUserPrivilege` — maps to `ipmitool channel setaccess`
+
+### Firmware Compliance (backend)
+
+Heuristic checks in `internal/ipmi/firmware.go` — TUI screen pending:
+
+- IPMI 1.5 detection (CVE-2013-4782 class — flags for human review)
+- Empty firmware revision (unconfigured or bricked BMC)
+- Firmware revision `0.00` / `00.00` (factory default, update required)
+
+### Redfish Full Enumeration (backend)
+
+Authenticated walk in `internal/redfish/enumerate.go` — TUI screen pending:
+
+- Systems collection: manufacturer, model, serial, SKU, hostname, BIOS version, power state, CPU count, memory GiB
+- Managers collection: name, firmware version, health status, UUID
 
 ---
 
 ## Planned Features
-
-### Discovery
-
-- Redfish full enumeration beyond detection and basic hardware info
 
 ### Authentication
 
@@ -112,8 +135,12 @@ The name reflects the project's purpose: visibility, remote control, and infrast
 
 ### Management
 
-- User management (`ipmitool user`)
-- Firmware compliance checks
+- User management TUI screen (backend complete — `internal/ipmi/users.go`)
+- Firmware compliance TUI screen (backend complete — `internal/ipmi/firmware.go`)
+
+### Discovery / Redfish
+
+- Redfish full enumeration TUI screen (backend complete — `internal/redfish/enumerate.go`)
 
 ### Virtual Media
 
@@ -308,9 +335,9 @@ For detailed technical writeups and excellent explanations of:
 
 ### Near Term
 
-- Redfish full enumeration (beyond detection and basic hardware info)
-- user management (`ipmitool user list / add / delete / set`)
-- firmware compliance checks
+- User management TUI screen (`internal/ipmi/users.go` is complete; needs screen + keybinding)
+- Firmware compliance TUI screen (`internal/ipmi/firmware.go` is complete; needs screen + keybinding)
+- Redfish full enumeration TUI screen (`internal/redfish/enumerate.go` is complete; needs screen + keybinding)
 
 ### Longer Term
 
@@ -318,13 +345,21 @@ For detailed technical writeups and excellent explanations of:
 - SSH tunnelling support
 - VPN-aware workflows
 - inventory export
-- firmware compliance checks
 - sensor dashboards
 - cluster / fleet operations
 
 ---
 
 ## Changelog
+
+### 0.0.6
+
+- **Live scan streaming** — nmap log events now surfaced to the status bar while a scan is running, replacing the static "Scanning…" message; uses `RunScanStream` internally via a buffered progress channel
+- **Progress bar wired** — `Progress` type now rendered in the loading screen; resets cleanly when SDR/SEL/FRU loads complete; bar appears when total count is available
+- **Structured logging** — `internal/logging` is now a real level-filtered logger (DEBUG/INFO/WARN/ERROR) writing RFC3339 timestamped lines to a file; defaults to discard so existing behaviour is unchanged
+- **User management backend** (`internal/ipmi/users.go`) — `GetUsers`, `EnableUser`, `DisableUser`, `SetUserPassword`, `SetUserName`, `SetUserPrivilege`; password wiped from memory post-call; TUI screen pending
+- **Firmware compliance backend** (`internal/ipmi/firmware.go`) — `GetFirmwareInfo`, `CheckFirmwareCompliance`; flags IPMI 1.5, empty revision, and `0.00` factory default; TUI screen pending
+- **Redfish full enumeration backend** (`internal/redfish/enumerate.go`) — authenticated walk of Systems (manufacturer, model, serial, SKU, hostname, BIOS version, power state, CPU count, memory GiB) and Managers (firmware version, health, UUID); TUI screen pending
 
 ### 0.0.5
 

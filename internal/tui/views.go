@@ -188,7 +188,12 @@ func (a *App) renderFRU() string {
 }
 
 func (a *App) renderLoading() string {
-	return fmt.Sprintf("\n\n  %s  %s\n\n  [Ctrl+C] Quit", a.spinner.View(), a.status)
+	line := fmt.Sprintf("\n\n  %s  %s\n", a.spinner.View(), a.status)
+	if a.loadProgress.Total > 0 {
+		line += "\n  " + a.loadProgress.Render(a.width-4) + "\n"
+	}
+	line += "\n  [Ctrl+C] Quit"
+	return line
 }
 
 func boolYesNo(v bool) string {

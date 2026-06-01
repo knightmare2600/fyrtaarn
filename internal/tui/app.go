@@ -65,6 +65,10 @@ type powerMsg struct {
 	Err    error
 }
 
+type scanProgressMsg struct {
+	Text string
+}
+
 type eggTickMsg struct{}
 
 type solMsg struct {
@@ -120,8 +124,11 @@ type App struct {
 	selOffset  int
 	fruOffset  int
 
-	eggOffset    int
-	sessionCache *session.Cache
+	loadProgress Progress
+
+	eggOffset      int
+	sessionCache   *session.Cache
+	scanProgressCh chan scanProgressMsg
 }
 
 /* ---------------- INIT ---------------- */
@@ -156,14 +163,33 @@ func NewApp() *App {
 
 /* ---------------- COMMANDS ---------------- */
 
-func runScanCmd(subnet string, profile discovery.ScanProfile, customPorts string) tea.Cmd {
+func runScanCmd(subnet string, profile discovery.ScanProfile, customPorts string, prog chan<- scanProgressMsg) tea.Cmd {
 	return func() tea.Msg {
-		results, err := discovery.RunScan(subnet, profile, customPorts)
+		events := make(chan discovery.StreamEvent, 32)
+		go func() {
+			for ev := range events {
+				if prog != nil {
+					prog <- scanProgressMsg{Text: ev.Data}
+				}
+			}
+		}()
+		_, results, err := discovery.RunScanStream(subnet, profile, customPorts, events)
 		if err != nil {
 			return scanFinishedMsg{Err: err}
 		}
 		results = discovery.EnrichResults(results)
 		return scanFinishedMsg{Results: results}
+	}
+}
+
+// listenScanProgress drains the progress channel and returns one msg per tick.
+func listenScanProgress(ch <-chan scanProgressMsg) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return msg
 	}
 }
 
@@ -285,9 +311,16 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case scanProgressMsg:
+		if msg.Text != "" {
+			a.status = msg.Text
+		}
+		return a, listenScanProgress(a.scanProgressCh)
+
 	case scanFinishedMsg:
 		a.scanning = false
 		a.scanPerformed = true
+		a.scanProgressCh = nil
 		if msg.Err != nil {
 			a.status = msg.Err.Error()
 			return a, nil
@@ -323,6 +356,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sdrMsg:
 		a.ipmiLoading = false
+		a.loadProgress = Progress{}
 		if msg.Err != nil {
 			a.status = "SDR error: " + msg.Err.Error()
 			return a, nil
@@ -335,6 +369,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case selMsg:
 		a.ipmiLoading = false
+		a.loadProgress = Progress{}
 		if msg.Err != nil {
 			a.status = "SEL error: " + msg.Err.Error()
 			return a, nil
@@ -351,6 +386,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case fruMsg:
 		a.ipmiLoading = false
+		a.loadProgress = Progress{}
 		if msg.Err != nil {
 			a.status = "FRU error: " + msg.Err.Error()
 			return a, nil
@@ -513,8 +549,13 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 			LastPorts:  a.lastPorts,
 		})
 		a.scanning = true
+		a.scanProgressCh = make(chan scanProgressMsg, 32)
 		a.status = fmt.Sprintf("Scanning %s (%s profile)", subnet, profile)
-		return a, tea.Batch(a.spinner.Tick, runScanCmd(subnet, profile, customPorts))
+		return a, tea.Batch(
+			a.spinner.Tick,
+			runScanCmd(subnet, profile, customPorts, a.scanProgressCh),
+			listenScanProgress(a.scanProgressCh),
+		)
 
 	case "connect":
 		dlg := a.activeDialog
