@@ -409,22 +409,6 @@ func advisorySeverityColor(severity string) string {
 	}
 }
 
-// advisorySeverityColor returns a Solarized-palette hex colour for a CVSS severity label.
-func advisorySeverityColor(severity string) string {
-	switch severity {
-	case "CRITICAL":
-		return "#DC322F"
-	case "HIGH":
-		return "#CB4B16"
-	case "MEDIUM":
-		return "#B58900"
-	case "LOW":
-		return "#859900"
-	default:
-		return "#2AA198"
-	}
-}
-
 /* ---------------- REDFISH FULL ENUMERATION ---------------- */
 
 func (a *App) renderRedfishEnum() string {
