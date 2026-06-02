@@ -90,9 +90,12 @@ func RunScanStream(
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// stdout carries the XML output. When -oX - is used nmap also writes its
-	// --stats-every progress lines here, interleaved with the XML. Intercept
-	// those lines before they reach xmlBuf so the XML parser stays clean.
+	// stdout carries the XML output. With -oX - nmap embeds --stats-every
+	// progress as <taskprogress percent="12.50" .../> XML elements in the
+	// stream. Parse those for progress events (they stay in xmlBuf since they
+	// are valid XML the decoder ignores). Also intercept any plain-text
+	// "About X% done" lines that some nmap builds write here — those are NOT
+	// valid XML and must be excluded from xmlBuf.
 	go func() {
 		defer wg.Done()
 		defer close(hostChan)
@@ -100,9 +103,12 @@ func RunScanStream(
 		for scanner.Scan() {
 			line := scanner.Text()
 			if events != nil {
-				if pct, ok := parseProgress(line); ok {
+				if pct, ok := parseXMLProgress(line); ok {
 					events <- StreamEvent{Type: "progress", Data: pct}
-					continue // do not add stats lines to the XML buffer
+					// valid XML element — fall through to xmlBuf
+				} else if pct, ok := parseProgress(line); ok {
+					events <- StreamEvent{Type: "progress", Data: pct}
+					continue // plain text would corrupt the XML buffer
 				}
 				if strings.Contains(line, "</host>") {
 					events <- StreamEvent{Type: "host", Data: line}
@@ -150,8 +156,31 @@ func RunScanStream(
 	return hostChan, results, nil
 }
 
+// parseXMLProgress extracts the percentage from a nmap <taskprogress> element.
+// Returns ("12.50", true) for a line like:
+//
+//	<taskprogress task="..." percent="12.50" remaining="70" .../>
+//
+// These appear in the stdout XML stream when --stats-every is used with -oX -.
+func parseXMLProgress(line string) (string, bool) {
+	if !strings.Contains(line, "<taskprogress") {
+		return "", false
+	}
+	i := strings.Index(line, `percent="`)
+	if i < 0 {
+		return "", false
+	}
+	rest := line[i+9:]
+	j := strings.Index(rest, `"`)
+	if j < 0 {
+		return "", false
+	}
+	return strings.TrimSpace(rest[:j]), true
+}
+
 // parseProgress extracts the percentage string from a nmap --stats-every line.
 // Returns ("39.06", true) for a line containing "About 39.06% done".
+// This is the plain-text form; used as a fallback for stderr output.
 func parseProgress(line string) (string, bool) {
 	i := strings.Index(line, "About ")
 	if i < 0 {
