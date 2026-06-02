@@ -1735,7 +1735,27 @@ func (a *App) aboutView() string {
 	b.WriteString(fmt.Sprintf("  Version:     %s\n", a.Version))
 	b.WriteString(fmt.Sprintf("  Commit:      %s\n", a.Commit))
 	b.WriteString(fmt.Sprintf("  Build Date:  %s\n\n", a.BuildDate))
-	b.WriteString("  Dedicated to the work of Dan Kaminsky\n")
+
+	accent := lipgloss.NewStyle().Foreground(lipgloss.Color(CurrentTheme.Accent)).Bold(true)
+
+	b.WriteString(accent.Render("  Dedications") + "\n\n")
+
+	b.WriteString(accent.Render("  Dan Kaminsky") + "\n")
+	b.WriteString("  For pioneering work on BMC/IPMI security, remote management\n")
+	b.WriteString("  attack surfaces, and infrastructure visibility. His research\n")
+	b.WriteString("  exposed how dangerous and under-examined out-of-band systems\n")
+	b.WriteString("  could be. A small tribute remains in the code.\n\n")
+
+	b.WriteString(accent.Render("  IppSec") + "\n")
+	b.WriteString("  For educational walkthroughs and practical demonstrations.\n")
+	b.WriteString("  Trying your hardest to say Rødgrød med fløde... if you know,\n")
+	b.WriteString("  you know. ;)\n\n")
+
+	b.WriteString(accent.Render("  0xDF") + "\n")
+	b.WriteString("  For detailed technical writeups on post-exploitation, beyond-\n")
+	b.WriteString("  root methodologies, and operational enumeration. Jeg var at gå\n")
+	b.WriteString("  agurk med \"should\" på \"Release Comittee\" (:\n")
+
 	b.WriteString("\n  [ESC] Back")
 	return b.String()
 }
