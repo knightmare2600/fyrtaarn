@@ -93,6 +93,11 @@ func SetUserPrivilege(host, adminUser, adminPass string, userID, channel, level 
 
 // parseUserList parses "ipmitool user list" output.
 // Format: ID  Name	Callin  Link Auth  IPMI Msg   Channel Priv Limit
+//
+// When a slot has no name ipmitool leaves that column blank, so
+// strings.Fields collapses it: fields[1] becomes the Callin value
+// ("true"/"false") instead of the name. Detect this by checking whether
+// fields[1] is a boolean, and adjust field indices accordingly.
 func parseUserList(data string) []UserEntry {
 	var entries []UserEntry
 
@@ -104,8 +109,7 @@ func parseUserList(data string) []UserEntry {
 		}
 
 		fields := strings.Fields(line)
-		// Minimum: ID Name Callin Link IPMI Privilege
-		if len(fields) < 6 {
+		if len(fields) < 5 {
 			continue
 		}
 
@@ -114,16 +118,30 @@ func parseUserList(data string) []UserEntry {
 			continue
 		}
 
-		// Privilege may be multi-word ("NO ACCESS") — join remaining fields.
-		privilege := strings.Join(fields[5:], " ")
+		var name, callinF, linkF, ipmiF, privilege string
+
+		f1 := strings.ToLower(fields[1])
+		if f1 == "true" || f1 == "false" {
+			// Name column is absent: ID Callin Link IPMI Priv...
+			callinF, linkF, ipmiF = fields[1], fields[2], fields[3]
+			privilege = strings.Join(fields[4:], " ")
+		} else {
+			// Name column is present: ID Name Callin Link IPMI Priv...
+			if len(fields) < 6 {
+				continue
+			}
+			name = fields[1]
+			callinF, linkF, ipmiF = fields[2], fields[3], fields[4]
+			privilege = strings.Join(fields[5:], " ")
+		}
 
 		entries = append(entries, UserEntry{
 			ID:            id,
-			Name:          fields[1],
-			CallinEnabled: strings.EqualFold(fields[2], "true"),
-			LinkEnabled:   strings.EqualFold(fields[3], "true"),
-			IPMIEnabled:   strings.EqualFold(fields[4], "true"),
-			Enabled:       fields[1] != "" && fields[1] != "(Empty User)",
+			Name:          name,
+			CallinEnabled: strings.EqualFold(callinF, "true"),
+			LinkEnabled:   strings.EqualFold(linkF, "true"),
+			IPMIEnabled:   strings.EqualFold(ipmiF, "true"),
+			Enabled:       name != "" && name != "(Empty User)",
 			Privilege:     privilege,
 		})
 	}

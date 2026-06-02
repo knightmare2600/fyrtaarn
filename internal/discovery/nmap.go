@@ -7,6 +7,7 @@ import (
 	"net"
 	"os/exec"
 	"strings"
+	"sync"
 
 	"github.com/knightmare2600/fyrtaarn/internal/util"
 )
@@ -56,6 +57,8 @@ func RunScan(subnet string, profile ScanProfile, customPorts string) ([]HostResu
 }
 
 // RunScanStream runs nmap and optionally streams events to the caller.
+// When events is non-nil it is closed after both I/O goroutines finish,
+// allowing callers to range over it safely.
 func RunScanStream(
 	subnet string,
 	profile ScanProfile,
@@ -82,41 +85,59 @@ func RunScanStream(
 	}
 
 	var xmlBuf bytes.Buffer
-
 	hostChan := make(chan HostResult, 100)
 
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// stdout carries the XML output. When -oX - is used nmap also writes its
+	// --stats-every progress lines here, interleaved with the XML. Intercept
+	// those lines before they reach xmlBuf so the XML parser stays clean.
 	go func() {
+		defer wg.Done()
 		defer close(hostChan)
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
 			line := scanner.Text()
-			xmlBuf.WriteString(line + "\n")
-			if events != nil && strings.Contains(line, "</host>") {
-				events <- StreamEvent{Type: "host", Data: line}
+			if events != nil {
+				if pct, ok := parseProgress(line); ok {
+					events <- StreamEvent{Type: "progress", Data: pct}
+					continue // do not add stats lines to the XML buffer
+				}
+				if strings.Contains(line, "</host>") {
+					events <- StreamEvent{Type: "host", Data: line}
+				}
 			}
+			xmlBuf.WriteString(line + "\n")
 		}
 	}()
 
+	// stderr carries nmap's interactive output in some configurations. Keep
+	// the progress check here as a fallback for nmap builds that behave
+	// differently, but don't forward bare log lines — they are noisy.
 	go func() {
+		defer wg.Done()
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
 			if events == nil {
 				continue
 			}
 			line := scanner.Text()
-			// --stats-every lines: "... About 39.06% done; ..."
-			if i := strings.Index(line, "About "); i >= 0 {
-				rest := line[i+6:]
-				if j := strings.Index(rest, "% done"); j >= 0 {
-					events <- StreamEvent{Type: "progress", Data: strings.TrimSpace(rest[:j])}
-					continue
-				}
+			if pct, ok := parseProgress(line); ok {
+				events <- StreamEvent{Type: "progress", Data: pct}
 			}
-			events <- StreamEvent{Type: "log", Data: line}
 		}
 	}()
 
 	err = cmd.Wait()
+
+	// Wait for both goroutines to drain their pipes before closing events,
+	// ensuring no sends race against the close.
+	wg.Wait()
+	if events != nil {
+		close(events)
+	}
+
 	if err != nil {
 		return nil, nil, fmt.Errorf("nmap failed: %w", err)
 	}
@@ -127,6 +148,21 @@ func RunScanStream(
 	}
 
 	return hostChan, results, nil
+}
+
+// parseProgress extracts the percentage string from a nmap --stats-every line.
+// Returns ("39.06", true) for a line containing "About 39.06% done".
+func parseProgress(line string) (string, bool) {
+	i := strings.Index(line, "About ")
+	if i < 0 {
+		return "", false
+	}
+	rest := line[i+6:]
+	j := strings.Index(rest, "% done")
+	if j < 0 {
+		return "", false
+	}
+	return strings.TrimSpace(rest[:j]), true
 }
 
 func buildArgs(subnet string, profile ScanProfile, customPorts string) []string {

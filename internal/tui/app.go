@@ -493,7 +493,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.results = msg.Results
-		a.selectedHost = 0
+		a.selectedHost = -1
 		a.resultsOffset = 0
 		a.treeExpanded = false
 		a.currentScreen = screenResults
@@ -505,14 +505,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Err != nil {
 			a.status = msg.Err.Error()
 			// Clear bad credentials so the next Enter prompts again.
-			if len(a.results) > 0 {
+			if len(a.results) > 0 && a.selectedHost >= 0 {
 				a.sessionCache.Delete(a.results[a.selectedHost].IP)
 			}
 			a.currentScreen = screenResults
 			return a, nil
 		}
 		// Cache successful credentials for this host.
-		if len(a.results) > 0 {
+		if len(a.results) > 0 && a.selectedHost >= 0 {
 			a.sessionCache.Set(a.results[a.selectedHost].IP, a.username, a.password)
 		}
 		a.mcInfo = msg.Info
@@ -1077,10 +1077,10 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 			a.currentScreen = screenUsers
 			return a, nil
 		}
-		// Find first available (empty/disabled) slot.
+		// Find first available slot: disabled and no name set.
 		slotID := 0
 		for _, u := range a.users {
-			if !u.Enabled && (u.Name == "" || u.Name == "(Empty User)") {
+			if !u.Enabled && u.Name == "" {
 				slotID = u.ID
 				break
 			}
@@ -1122,10 +1122,16 @@ func (a *App) updateResults(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if a.selectedHost < a.resultsOffset {
 				a.resultsOffset = a.selectedHost
 			}
+		} else if a.selectedHost == 0 {
+			a.selectedHost = -1
 		}
 
 	case "down", "j":
-		if a.selectedHost < len(a.results)-1 {
+		if a.selectedHost < 0 {
+			if len(a.results) > 0 {
+				a.selectedHost = 0
+			}
+		} else if a.selectedHost < len(a.results)-1 {
 			a.selectedHost++
 			if a.selectedHost >= a.resultsOffset+visibleLines {
 				a.resultsOffset = a.selectedHost - visibleLines + 1
@@ -1136,7 +1142,7 @@ func (a *App) updateResults(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.treeExpanded = !a.treeExpanded
 
 	case "enter":
-		if len(a.results) == 0 {
+		if len(a.results) == 0 || a.selectedHost < 0 {
 			return a, nil
 		}
 		host := a.results[a.selectedHost]
@@ -1656,7 +1662,11 @@ func (a *App) renderResults() string {
 		end = len(a.results)
 	}
 
-	b.WriteString("  │\n")
+	if a.selectedHost < 0 {
+		b.WriteString(MenuStyle(true).Render("  │") + "\n")
+	} else {
+		b.WriteString("  │\n")
+	}
 
 	rfStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color(CurrentTheme.Accent)).
@@ -1784,7 +1794,11 @@ func (a *App) screenStatusHint() string {
 		if visLines < 1 {
 			visLines = 5
 		}
-		hint := fmt.Sprintf("[%d/%d]  [↑↓/jk] Navigate  [Tab] Expand  [Enter] Connect  [F9] Menu  [Q] Quit", a.selectedHost+1, total)
+		pos := "│"
+		if a.selectedHost >= 0 {
+			pos = strconv.Itoa(a.selectedHost + 1)
+		}
+		hint := fmt.Sprintf("[%s/%d]  [↑↓/jk] Navigate  [Tab] Expand  [Enter] Connect  [F9] Menu  [Q] Quit", pos, total)
 		if total > visLines {
 			end := a.resultsOffset + visLines
 			if end > total {
