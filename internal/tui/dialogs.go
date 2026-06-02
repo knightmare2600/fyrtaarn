@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -132,6 +133,93 @@ func NewPowerDialog(host, currentState string) *Dialog {
 			{Label: "Power Off", Action: "off"},
 			{Label: "Soft Shutdown", Action: "soft"},
 			{Label: "Reset", Action: "reset"},
+			{Label: "Cancel", Action: "cancel"},
+		},
+		focus: 0,
+	}
+}
+
+// NewUserActionDialog opens the per-user action picker.
+// If enabled is true the Disable button is shown; otherwise Enable is shown.
+func NewUserActionDialog(userID int, name string, enabled bool) *Dialog {
+	toggleLabel := "Enable"
+	toggleAction := "user-enable"
+	if enabled {
+		toggleLabel = "Disable"
+		toggleAction = "user-disable"
+	}
+	return &Dialog{
+		Title: fmt.Sprintf("User %d — %s", userID, name),
+		Body:  fmt.Sprintf("Manage user account (ID %d):", userID),
+		buttons: []DialogButton{
+			{Label: toggleLabel, Action: toggleAction},
+			{Label: "Set Password", Action: "user-setpwd"},
+			{Label: "Set Name", Action: "user-setname"},
+			{Label: "Set Privilege", Action: "user-setpriv"},
+			{Label: "Cancel", Action: "cancel"},
+		},
+		focus: 0,
+	}
+}
+
+// NewSetPasswordDialog prompts for a new password (with confirmation).
+func NewSetPasswordDialog() *Dialog {
+	pw1 := textinput.New()
+	pw1.Placeholder = "New password"
+	pw1.EchoMode = textinput.EchoPassword
+	pw1.EchoCharacter = '•'
+	pw1.Width = 30
+	pw1.Focus()
+
+	pw2 := textinput.New()
+	pw2.Placeholder = "Confirm password"
+	pw2.EchoMode = textinput.EchoPassword
+	pw2.EchoCharacter = '•'
+	pw2.Width = 30
+
+	return &Dialog{
+		Title:       "Set Password",
+		inputs:      []textinput.Model{pw1, pw2},
+		inputLabels: []string{"New Password", "Confirm"},
+		buttons: []DialogButton{
+			{Label: "Set Password", Action: "user-setpwd-confirm"},
+			{Label: "Cancel", Action: "cancel"},
+		},
+		focus: 0,
+	}
+}
+
+// NewSetNameDialog prompts for a new username, pre-filled with the current one.
+func NewSetNameDialog(currentName string) *Dialog {
+	inp := textinput.New()
+	inp.Placeholder = "username"
+	inp.SetValue(currentName)
+	inp.Width = 20
+	inp.Focus()
+
+	return &Dialog{
+		Title:       "Set Username",
+		inputs:      []textinput.Model{inp},
+		inputLabels: []string{"Name"},
+		buttons: []DialogButton{
+			{Label: "Set Name", Action: "user-setname-confirm"},
+			{Label: "Cancel", Action: "cancel"},
+		},
+		focus: 0,
+	}
+}
+
+// NewSetPrivilegeDialog lets the operator pick a privilege level.
+// IPMI levels: 2=User, 3=Operator, 4=Administrator, 5=OEM.
+func NewSetPrivilegeDialog() *Dialog {
+	return &Dialog{
+		Title: "Set Privilege Level",
+		Body:  "Select the new IPMI privilege level:",
+		buttons: []DialogButton{
+			{Label: "User (2)", Action: "user-priv-2"},
+			{Label: "Operator (3)", Action: "user-priv-3"},
+			{Label: "Administrator (4)", Action: "user-priv-4"},
+			{Label: "OEM (5)", Action: "user-priv-5"},
 			{Label: "Cancel", Action: "cancel"},
 		},
 		focus: 0,

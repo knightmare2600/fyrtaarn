@@ -4,15 +4,38 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"net"
 	"os/exec"
+	"strings"
 
 	"github.com/knightmare2600/fyrtaarn/internal/util"
 )
 
-// StreamEvent represents live scan updates (future UI hook).
+// StreamEvent represents a live update emitted while nmap is running.
+// Type is one of:
+//
+//	"host"     — a host element closed in the XML (Data is the raw line)
+//	"progress" — nmap --stats-every percentage (Data is e.g. "39.06")
+//	"log"      — raw stderr line for status display
 type StreamEvent struct {
-	Type string // "host", "progress", "log"
+	Type string
 	Data string
+}
+
+// CIDRHostCount returns the total number of IP addresses in the given CIDR,
+// including network and broadcast addresses (e.g. 256 for a /24).
+// Returns 0 if the CIDR cannot be parsed.
+func CIDRHostCount(cidr string) int {
+	_, network, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return 0
+	}
+	ones, bits := network.Mask.Size()
+	hostBits := bits - ones
+	if hostBits >= 32 {
+		return 0
+	}
+	return 1 << uint(hostBits)
 }
 
 // ScanProfile selects the nmap timing and port set.
@@ -68,8 +91,8 @@ func RunScanStream(
 		for scanner.Scan() {
 			line := scanner.Text()
 			xmlBuf.WriteString(line + "\n")
-			if events != nil && containsHostUp(line) {
-				events <- StreamEvent{Type: "log", Data: "nmap: " + line}
+			if events != nil && strings.Contains(line, "</host>") {
+				events <- StreamEvent{Type: "host", Data: line}
 			}
 		}
 	}()
@@ -77,9 +100,19 @@ func RunScanStream(
 	go func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
-			if events != nil {
-				events <- StreamEvent{Type: "log", Data: scanner.Text()}
+			if events == nil {
+				continue
 			}
+			line := scanner.Text()
+			// --stats-every lines: "... About 39.06% done; ..."
+			if i := strings.Index(line, "About "); i >= 0 {
+				rest := line[i+6:]
+				if j := strings.Index(rest, "% done"); j >= 0 {
+					events <- StreamEvent{Type: "progress", Data: strings.TrimSpace(rest[:j])}
+					continue
+				}
+			}
+			events <- StreamEvent{Type: "log", Data: line}
 		}
 	}()
 
@@ -118,6 +151,7 @@ func buildArgs(subnet string, profile ScanProfile, customPorts string) []string 
 		"-n",
 		"-Pn",
 		"--open",
+		"--stats-every", "2s",
 		"-p", ports,
 		"-oX", "-",
 	}
@@ -132,8 +166,4 @@ func buildArgs(subnet string, profile ScanProfile, customPorts string) []string 
 	}
 
 	return append([]string{"-sT"}, append(args, subnet)...)
-}
-
-func containsHostUp(line string) bool {
-	return len(line) > 0 && (line[0] == '<' || line[0] == '#')
 }

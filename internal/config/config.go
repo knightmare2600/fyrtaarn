@@ -10,6 +10,7 @@ type Config struct {
 	Theme      string `json:"theme"`
 	LastSubnet string `json:"last_subnet"`
 	LastPorts  string `json:"last_ports"`
+	NVDAPIKey  string `json:"nvd_api_key,omitempty"`
 }
 
 func path() (string, error) {

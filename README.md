@@ -86,7 +86,7 @@ The name reflects the project's purpose: visibility, remote control, and infrast
   - Cyan — informational (default)
 - **FRU / hardware inventory** — scrollable `ipmitool fru` output with device section headers
 - **Power control** — on, off, soft shutdown, reset; dialog shows current chassis power state
-- **SOL console** — Serial over LAN via `ipmitool sol activate`; TUI suspends and hands the full terminal to the SOL session; resuming returns to the BMC info screen (`[O]` from BMC Info)
+- **SOL console** — Serial over LAN runs inside a TUI pane (`[O]` from BMC Info); ipmitool executes in a pty so the menu bar and status bar stay visible; ANSI stripped, 1000-line scrollback buffer, `[F10]` disconnect, `[PgUp/PgDn]` scroll; Ctrl+C forwarded to the BMC rather than quitting the app
 - **Virtual media** — Redfish ISO mount and eject via `InsertMedia`/`EjectMedia` actions; walks `Managers → VirtualMedia` to find the CD/DVD slot (`[V]` from BMC Info; requires Redfish-capable host)
 
 ### Architecture
@@ -96,32 +96,28 @@ The name reflects the project's purpose: visibility, remote control, and infrast
 - Per-command timeouts — 15 s for single-round-trip commands; 90 s for bulk SDR/SEL reads
 - ipmitool credential string zeroed from memory after each command
 - Structured file logger (`internal/logging`) — level-filtered, RFC3339 timestamps, defaults to discard (opt-in)
-- Live scan streaming — nmap log events surfaced to the status bar while a scan is running; progress bar shown in the loading screen when count data is available
+- Scan progress bar — status bar shows `[████░░░] 89/256 · 3 found` during nmap scans; CIDR host count is the denominator; nmap `--stats-every 2s` drives the bar; `</host>` closures in the XML stream increment the found counter
 
-### User Management (backend)
+### User Management
 
-Functions available in `internal/ipmi/users.go` — TUI screen pending:
+- **User list screen** — scrollable table of ID, name, enabled state, privilege level; `[U]` from BMC Info; cursor navigation with `[↑↓/jk]`; `[Enter]` opens per-user action dialog
+- **User management dialogs** — enable/disable, set password (with confirmation), set username, set privilege level (User/Operator/Administrator/OEM); user list refreshes automatically after each action
+- Backend (`internal/ipmi/users.go`): `GetUsers`, `EnableUser`, `DisableUser`, `SetUserPassword`, `SetUserName`, `SetUserPrivilege`; passwords wiped from memory post-call
 
-- `GetUsers` — `ipmitool user list` with parsed privilege levels
-- `EnableUser` / `DisableUser`
-- `SetUserPassword` — password wiped from memory after the call
-- `SetUserName`
-- `SetUserPrivilege` — maps to `ipmitool channel setaccess`
+### Firmware Compliance
 
-### Firmware Compliance (backend)
+- **Compliance screen** — `[C]` from BMC Info; two-pass check:
+  1. Heuristic pass — IPMI 1.5 (CVE-2013-4782 class), empty firmware revision, factory `0.00` default
+  2. Advisory feed pass — queries NIST NVD (CPE-matched) and CISA KEV (active-exploitation flag); runs concurrently after heuristics while the screen is already visible
+- CVEs shown with CVSS score, severity badge, and `⚠ KEV` marker if actively exploited in the wild
+- Up to 15 CVEs shown, sorted by CVSS descending with actively-exploited entries first
+- Scrollable (`[↑↓/jk]`) when CVE list overflows the screen
+- NVD API key optional (add `"nvd_api_key"` to `~/.config/fyrtaarn/config.json`); without a key the rate limit is 5 req/30 s which is fine for single-host spot checks
 
-Heuristic checks in `internal/ipmi/firmware.go` — TUI screen pending:
+### Redfish Full Enumeration
 
-- IPMI 1.5 detection (CVE-2013-4782 class — flags for human review)
-- Empty firmware revision (unconfigured or bricked BMC)
-- Firmware revision `0.00` / `00.00` (factory default, update required)
-
-### Redfish Full Enumeration (backend)
-
-Authenticated walk in `internal/redfish/enumerate.go` — TUI screen pending:
-
-- Systems collection: manufacturer, model, serial, SKU, hostname, BIOS version, power state, CPU count, memory GiB
-- Managers collection: name, firmware version, health status, UUID
+- **Redfish screen** — scrollable Systems + Managers view; `[R]` from BMC Info (Redfish hosts only)
+- Authenticated walk (`internal/redfish/enumerate.go`): Systems (manufacturer, model, serial, SKU, hostname, BIOS version, power state, CPU count, memory GiB) and Managers (firmware version, health, UUID)
 
 ---
 
@@ -135,12 +131,8 @@ Authenticated walk in `internal/redfish/enumerate.go` — TUI screen pending:
 
 ### Management
 
-- User management TUI screen (backend complete — `internal/ipmi/users.go`)
-- Firmware compliance TUI screen (backend complete — `internal/ipmi/firmware.go`)
-
-### Discovery / Redfish
-
-- Redfish full enumeration TUI screen (backend complete — `internal/redfish/enumerate.go`)
+- User create / delete from within the TUI (enable, disable, set-password, set-name, set-privilege are functional)
+- Firmware advisory feed covers broader vendor set and version-aware CPE matching
 
 ### Virtual Media
 
@@ -212,6 +204,51 @@ an official maintained Windows binary. Options:
 
 ---
 
+## Advisory Feed Setup
+
+The firmware compliance screen (`[C]`) queries two public sources:
+
+| Source | Key required | Rate limit |
+|---|---|---|
+| NIST NVD | No (optional) | 5 req / 30 s without key · 50 req / 30 s with key |
+| CISA KEV | No | No limit — single bulk download, cached 1 h |
+
+### NIST NVD API Key
+
+A key is not required. For single-host spot checks the unauthenticated limit is
+fine. If you are running compliance checks against many hosts in quick succession,
+get a free key.
+
+**How to register (takes about 2 minutes):**
+
+1. Go to <https://nvd.nist.gov/developers/request-an-api-key>
+2. Enter your email address and submit the form
+3. NIST emails you a UUID-format key immediately — no payment, no account, no approval process
+4. The key looks like: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`
+
+**Add the key to `~/.config/fyrtaarn/config.json`:**
+
+```json
+{
+  "theme": "dracula",
+  "last_subnet": "192.168.0.0/24",
+  "nvd_api_key": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+}
+```
+
+The file is created automatically on first run. You can add `nvd_api_key` by hand
+with any text editor — fyrtaarn preserves it across theme and scan config saves.
+
+### CISA Known Exploited Vulnerabilities
+
+No setup required. fyrtaarn fetches the catalog from the public CISA endpoint
+on demand and caches it in-process for one hour. CVEs present in the catalog are
+flagged `⚠ KEV` in red on the compliance screen — these are vulnerabilities with
+confirmed active exploitation in the wild and should be treated as urgent regardless
+of their CVSS score.
+
+---
+
 ## Build
 
 ```bash
@@ -250,8 +287,14 @@ sudo ./dist/fyrtaarn
 | S           | BMC Info       | Load sensor list (SDR)         |
 | L           | BMC Info       | Load event log (SEL)           |
 | F           | BMC Info       | Load FRU / hardware inventory  |
+| U           | BMC Info       | Load user account list         |
+| C           | BMC Info       | Run firmware compliance check  |
+| R           | BMC Info       | Redfish full enumeration       |
 | P           | BMC Info       | Power control dialog           |
-| O           | BMC Info       | Open SOL console               |
+| O           | BMC Info       | Open SOL console (in-pane)     |
+| F10         | SOL Console    | Disconnect and return          |
+| PgUp        | SOL Console    | Scroll up through buffer       |
+| PgDn        | SOL Console    | Scroll down / snap to bottom   |
 | V           | BMC Info       | Virtual media dialog (Redfish) |
 | Esc / Q     | Most screens   | Back / quit                    |
 
@@ -335,9 +378,9 @@ For detailed technical writeups and excellent explanations of:
 
 ### Near Term
 
-- User management TUI screen (`internal/ipmi/users.go` is complete; needs screen + keybinding)
-- Firmware compliance TUI screen (`internal/ipmi/firmware.go` is complete; needs screen + keybinding)
-- Redfish full enumeration TUI screen (`internal/redfish/enumerate.go` is complete; needs screen + keybinding)
+- User create / delete from within the TUI (enable, disable, set-password, set-name, set-privilege now functional)
+- Version-aware CPE matching for advisory feed (currently returns all CVEs for the product family)
+- Redfish full enumeration for non-Redfish-flagged hosts (currently gated by `[RF]` detection)
 
 ### Longer Term
 
@@ -352,14 +395,30 @@ For detailed technical writeups and excellent explanations of:
 
 ## Changelog
 
+### 0.0.8
+
+- **Firmware advisory feed** — compliance screen (`[C]`) now runs a second async pass after heuristics: queries NIST NVD via CPE 2.3 formatted-string-binding (wildcard version, product-family scoped) and cross-references CISA Known Exploited Vulnerabilities catalog; NVD API key optional (free registration); CISA KEV cached in-process for 1 hour
+- CPE mapping table covers HP iLO (gen 3–6), Dell iDRAC (7/8/9), Supermicro IPMI, Oracle ILOM, Lenovo XCC, Quanta BMC, AMI MegaRAC
+- CVEs shown with CVSS v3.1/v3.0/v2 score, severity badge (CRITICAL/HIGH/MEDIUM/LOW colour-coded), and `⚠ KEV` marker for actively-exploited entries; sorted CVSS descending with KEV entries first; capped at 15
+- Compliance screen is now scrollable (`[↑↓/jk]`) once advisory results populate
+- `nvd_api_key` field added to `~/.config/fyrtaarn/config.json`; preserved across theme and scan config saves
+- `internal/advisory` package: `advisory.go`, `cpe_map.go`, `nvd.go`, `kev.go`
+
+### 0.0.7
+
+- **User write-action dialogs** — `[Enter]` on the user list opens a per-user action picker; available actions: Enable/Disable (toggled by current state), Set Password (with confirmation field), Set Username, Set Privilege (User/Operator/Administrator/OEM); user list refreshes automatically after each successful action
+- **User list selection** — cursor-based row navigation (`[↑↓/jk]`) with selection highlighting; scroll follows the cursor; status bar shows `[N/total]` position and `[Enter] Manage` hint
+- User write-action dialogs are multi-step: the action picker opens a sub-dialog for password/name/privilege, keeping `pendingUserID` in scope throughout; password mismatch and empty-name validation surfaced as status bar messages
+
 ### 0.0.6
 
-- **Live scan streaming** — nmap log events now surfaced to the status bar while a scan is running, replacing the static "Scanning…" message; uses `RunScanStream` internally via a buffered progress channel
+- **In-pane SOL console** — `[O]` from BMC Info now opens Serial over LAN inside the TUI rather than handing the terminal to ipmitool; the menu bar and status bar remain visible throughout. ipmitool runs inside a pty (`github.com/creack/pty`); ANSI/VT100 escape codes are stripped and output captured into a 1000-line scrollback buffer. All keys forwarded to the BMC; `[F10]` disconnects; `[PgUp/PgDn]` scrolls the buffer; any forwarded keypress snaps back to the bottom. Ctrl+C is forwarded to the SOL session rather than quitting the app. Requires `go mod tidy` on first build to pull in the pty dependency.
+- **Scan progress bar** — status bar now shows a live `[████░░░] 89/256 · 3 found` progress bar during nmap scans; denominator is the CIDR host count (`CIDRHostCount`); numerator advances from nmap `--stats-every 2s` percentage updates parsed from stderr; discovered host count increments on each `</host>` closure in the XML stream
 - **Progress bar wired** — `Progress` type now rendered in the loading screen; resets cleanly when SDR/SEL/FRU loads complete; bar appears when total count is available
 - **Structured logging** — `internal/logging` is now a real level-filtered logger (DEBUG/INFO/WARN/ERROR) writing RFC3339 timestamped lines to a file; defaults to discard so existing behaviour is unchanged
-- **User management backend** (`internal/ipmi/users.go`) — `GetUsers`, `EnableUser`, `DisableUser`, `SetUserPassword`, `SetUserName`, `SetUserPrivilege`; password wiped from memory post-call; TUI screen pending
-- **Firmware compliance backend** (`internal/ipmi/firmware.go`) — `GetFirmwareInfo`, `CheckFirmwareCompliance`; flags IPMI 1.5, empty revision, and `0.00` factory default; TUI screen pending
-- **Redfish full enumeration backend** (`internal/redfish/enumerate.go`) — authenticated walk of Systems (manufacturer, model, serial, SKU, hostname, BIOS version, power state, CPU count, memory GiB) and Managers (firmware version, health, UUID); TUI screen pending
+- **User management** (`internal/ipmi/users.go` + TUI screen) — `[U]` from BMC Info; scrollable list of ID, name, enabled state, privilege level; backend supports enable/disable, set password, set name, set privilege; write-action dialogs planned
+- **Firmware compliance** (`internal/ipmi/firmware.go` + TUI screen) — `[C]` from BMC Info; colour-coded pass/fail with per-issue amber warnings; flags IPMI 1.5, empty revision, and `0.00` factory default
+- **Redfish full enumeration** (`internal/redfish/enumerate.go` + TUI screen) — `[R]` from BMC Info (Redfish hosts only); authenticated walk of Systems (manufacturer, model, serial, SKU, hostname, BIOS version, power state, CPU count, memory GiB) and Managers (firmware version, health, UUID); scrollable
 
 ### 0.0.5
 

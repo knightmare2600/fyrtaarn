@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -11,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/knightmare2600/fyrtaarn/internal/advisory"
 	"github.com/knightmare2600/fyrtaarn/internal/config"
 	"github.com/knightmare2600/fyrtaarn/internal/discovery"
 	"github.com/knightmare2600/fyrtaarn/internal/ipmi"
@@ -29,6 +31,10 @@ const (
 	screenSensor
 	screenSEL
 	screenFRU
+	screenUsers
+	screenFirmware
+	screenRedfish
+	screenSOL
 )
 
 /* ---------------- MESSAGES ---------------- */
@@ -66,18 +72,41 @@ type powerMsg struct {
 }
 
 type scanProgressMsg struct {
-	Text string
+	Text      string
+	HostFound bool    // a </host> was seen in the XML stream
+	Percent   float64 // parsed from --stats-every; 0 = not a progress update
 }
 
 type eggTickMsg struct{}
 
-type solMsg struct {
-	Err error
-}
-
 type vmMsg struct {
 	Action string
 	Err    error
+}
+
+type usersMsg struct {
+	Entries []ipmi.UserEntry
+	Err     error
+}
+
+type firmwareMsg struct {
+	Result *ipmi.ComplianceResult
+	Err    error
+}
+
+type redfishEnumMsg struct {
+	Result *redfish.FullEnumeration
+	Err    error
+}
+
+type userActionMsg struct {
+	Action string
+	Err    error
+}
+
+type advisoryMsg struct {
+	Findings []advisory.CVEFinding
+	Err      error
 }
 
 /* ---------------- APP ---------------- */
@@ -125,6 +154,23 @@ type App struct {
 	fruOffset  int
 
 	loadProgress Progress
+	hostsFound   int
+
+	users        []ipmi.UserEntry
+	usersOffset  int
+	selectedUser int
+	pendingUserID int
+
+	firmwareResult   *ipmi.ComplianceResult
+	firmwareAdvisory []advisory.CVEFinding
+	firmwareOffset   int
+	advisoryLoading  bool
+	nvdAPIKey        string
+
+	redfishEnum       *redfish.FullEnumeration
+	redfishOffset     int
+
+	solPane *solPane
 
 	eggOffset      int
 	sessionCache   *session.Cache
@@ -158,6 +204,7 @@ func NewApp() *App {
 		sessionCache:  session.NewCache(),
 		lastSubnet:    lastSubnet,
 		lastPorts:     cfg.LastPorts,
+		nvdAPIKey:     cfg.NVDAPIKey,
 	}
 }
 
@@ -168,9 +215,20 @@ func runScanCmd(subnet string, profile discovery.ScanProfile, customPorts string
 		events := make(chan discovery.StreamEvent, 32)
 		go func() {
 			for ev := range events {
-				if prog != nil {
-					prog <- scanProgressMsg{Text: ev.Data}
+				if prog == nil {
+					continue
 				}
+				msg := scanProgressMsg{}
+				switch ev.Type {
+				case "host":
+					msg.HostFound = true
+				case "progress":
+					pct, _ := strconv.ParseFloat(ev.Data, 64)
+					msg.Percent = pct
+				default:
+					msg.Text = ev.Data
+				}
+				prog <- msg
 			}
 		}()
 		_, results, err := discovery.RunScanStream(subnet, profile, customPorts, events)
@@ -262,6 +320,69 @@ func runGetFRU(host, user, pass string) tea.Cmd {
 	}
 }
 
+func runGetUsers(host, user, pass string) tea.Cmd {
+	return func() tea.Msg {
+		entries, err := ipmi.GetUsers(host, user, pass)
+		return usersMsg{Entries: entries, Err: err}
+	}
+}
+
+func runUserEnable(host, adminUser, adminPass string, userID int) tea.Cmd {
+	return func() tea.Msg {
+		err := ipmi.EnableUser(host, adminUser, adminPass, userID)
+		return userActionMsg{Action: "enable", Err: err}
+	}
+}
+
+func runUserDisable(host, adminUser, adminPass string, userID int) tea.Cmd {
+	return func() tea.Msg {
+		err := ipmi.DisableUser(host, adminUser, adminPass, userID)
+		return userActionMsg{Action: "disable", Err: err}
+	}
+}
+
+func runUserSetPassword(host, adminUser, adminPass string, userID int, newPass string) tea.Cmd {
+	return func() tea.Msg {
+		err := ipmi.SetUserPassword(host, adminUser, adminPass, userID, newPass)
+		return userActionMsg{Action: "set-password", Err: err}
+	}
+}
+
+func runUserSetName(host, adminUser, adminPass string, userID int, name string) tea.Cmd {
+	return func() tea.Msg {
+		err := ipmi.SetUserName(host, adminUser, adminPass, userID, name)
+		return userActionMsg{Action: "set-name", Err: err}
+	}
+}
+
+func runUserSetPrivilege(host, adminUser, adminPass string, userID, level int) tea.Cmd {
+	return func() tea.Msg {
+		err := ipmi.SetUserPrivilege(host, adminUser, adminPass, userID, 1, level)
+		return userActionMsg{Action: "set-privilege", Err: err}
+	}
+}
+
+func runFirmwareCheck(host, user, pass string) tea.Cmd {
+	return func() tea.Msg {
+		result, err := ipmi.CheckFirmwareCompliance(host, user, pass)
+		return firmwareMsg{Result: result, Err: err}
+	}
+}
+
+func runAdvisoryCheck(manufacturer, productName, apiKey string) tea.Cmd {
+	return func() tea.Msg {
+		findings, err := advisory.Check(manufacturer, productName, apiKey)
+		return advisoryMsg{Findings: findings, Err: err}
+	}
+}
+
+func runRedfishEnum(host, user, pass string) tea.Cmd {
+	return func() tea.Msg {
+		result, err := redfish.EnumerateFull(host, user, pass)
+		return redfishEnumMsg{Result: result, Err: err}
+	}
+}
+
 func runPowerAction(host, user, pass, action string) tea.Cmd {
 	return func() tea.Msg {
 		var err error
@@ -294,10 +415,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
 		a.height = msg.Height
+		if a.solPane != nil {
+			a.solPane.resize(msg.Width, msg.Height-2)
+		}
 		return a, nil
 
 	case spinner.TickMsg:
-		if a.scanning || a.ipmiLoading {
+		if a.scanning || a.ipmiLoading || a.advisoryLoading {
 			var cmd tea.Cmd
 			a.spinner, cmd = a.spinner.Update(msg)
 			return a, cmd
@@ -312,7 +436,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case scanProgressMsg:
-		if msg.Text != "" {
+		switch {
+		case msg.HostFound:
+			a.hostsFound++
+		case msg.Percent > 0 && a.loadProgress.Total > 0:
+			a.loadProgress.Current = int(msg.Percent / 100 * float64(a.loadProgress.Total))
+		case msg.Text != "":
 			a.status = msg.Text
 		}
 		return a, listenScanProgress(a.scanProgressCh)
@@ -397,6 +526,98 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.status = fmt.Sprintf("%d FRU fields", len(a.fru))
 		return a, nil
 
+	case usersMsg:
+		a.ipmiLoading = false
+		a.loadProgress = Progress{}
+		if msg.Err != nil {
+			a.status = "User list error: " + msg.Err.Error()
+			return a, nil
+		}
+		a.users = msg.Entries
+		a.usersOffset = 0
+		a.selectedUser = 0
+		a.currentScreen = screenUsers
+		a.status = fmt.Sprintf("%d users", len(a.users))
+
+	case userActionMsg:
+		a.ipmiLoading = false
+		if msg.Err != nil {
+			a.status = fmt.Sprintf("User %s error: %s", msg.Action, msg.Err.Error())
+			a.currentScreen = screenUsers
+			return a, nil
+		}
+		a.status = fmt.Sprintf("User %s: done", msg.Action)
+		// Re-fetch the user list so the display reflects the change.
+		if len(a.results) > 0 {
+			host := a.results[a.selectedHost].IP
+			a.ipmiLoading = true
+			return a, tea.Batch(a.spinner.Tick, runGetUsers(host, a.username, a.password))
+		}
+		a.currentScreen = screenUsers
+		return a, nil
+
+	case firmwareMsg:
+		a.ipmiLoading = false
+		a.loadProgress = Progress{}
+		if msg.Err != nil {
+			a.status = "Firmware check error: " + msg.Err.Error()
+			return a, nil
+		}
+		a.firmwareResult = msg.Result
+		a.firmwareAdvisory = nil
+		a.firmwareOffset = 0
+		a.currentScreen = screenFirmware
+		if msg.Result.Compliant {
+			a.status = "Firmware: compliant — checking advisory feed..."
+		} else {
+			a.status = fmt.Sprintf("Firmware: %d heuristic issue(s) — checking advisory feed...", len(msg.Result.Issues))
+		}
+		a.advisoryLoading = true
+		return a, tea.Batch(a.spinner.Tick, runAdvisoryCheck(msg.Result.Info.ManufacturerName, msg.Result.Info.ProductName, a.nvdAPIKey))
+
+	case advisoryMsg:
+		a.advisoryLoading = false
+		if msg.Err != nil {
+			// Non-fatal: surface as a note in the status bar.
+			a.status = "Advisory: " + msg.Err.Error()
+			return a, nil
+		}
+		a.firmwareAdvisory = msg.Findings
+		heurIssues := 0
+		if a.firmwareResult != nil {
+			heurIssues = len(a.firmwareResult.Issues)
+		}
+		kev := 0
+		for _, f := range msg.Findings {
+			if f.ActivelyExploited {
+				kev++
+			}
+		}
+		if len(msg.Findings) == 0 && heurIssues == 0 {
+			a.status = "Firmware: compliant — no CVEs found"
+		} else if kev > 0 {
+			a.status = fmt.Sprintf("Firmware: %d CVE(s) (%d actively exploited), %d heuristic issue(s)",
+				len(msg.Findings), kev, heurIssues)
+		} else {
+			a.status = fmt.Sprintf("Firmware: %d CVE(s), %d heuristic issue(s)",
+				len(msg.Findings), heurIssues)
+		}
+		return a, nil
+
+	case redfishEnumMsg:
+		a.ipmiLoading = false
+		a.loadProgress = Progress{}
+		if msg.Err != nil {
+			a.status = "Redfish error: " + msg.Err.Error()
+			return a, nil
+		}
+		a.redfishEnum = msg.Result
+		a.redfishOffset = 0
+		a.currentScreen = screenRedfish
+		a.status = fmt.Sprintf("Redfish: %d system(s), %d manager(s)",
+			len(msg.Result.Systems), len(msg.Result.Managers))
+		return a, nil
+
 	case powerMsg:
 		a.ipmiLoading = false
 		if msg.Err != nil {
@@ -407,14 +628,36 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.currentScreen = screenMCInfo
 		return a, nil
 
-	case solMsg:
-		// SOL session ended — ipmitool has exited and the TUI is restored.
+	case solPaneReadyMsg:
+		a.ipmiLoading = false
+		a.solPane = msg.pane
+		a.currentScreen = screenSOL
+		a.status = "SOL active — [F10] disconnect  [PgUp/PgDn] scroll"
+		return a, listenSOL(msg.pane.ptmx)
+
+	case solReadMsg:
 		if msg.Err != nil {
-			a.status = "SOL ended: " + msg.Err.Error()
-		} else {
-			a.status = "SOL session ended"
+			// Error starting the pane (e.g. pty fork failed).
+			a.ipmiLoading = false
+			a.status = "SOL error: " + msg.Err.Error()
+			a.currentScreen = screenMCInfo
+			return a, nil
+		}
+		if a.solPane == nil {
+			return a, nil // pane was closed — discard stale read
+		}
+		if len(msg.Data) > 0 {
+			a.solPane.ingest(msg.Data)
+		}
+		return a, listenSOL(a.solPane.ptmx)
+
+	case solDoneMsg:
+		if a.solPane != nil {
+			a.solPane.close()
+			a.solPane = nil
 		}
 		a.currentScreen = screenMCInfo
+		a.status = "SOL session ended"
 		return a, nil
 
 	case vmMsg:
@@ -433,7 +676,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 
-		if msg.String() == "ctrl+c" {
+		if msg.String() == "ctrl+c" && a.currentScreen != screenSOL {
 			return a, tea.Quit
 		}
 
@@ -491,6 +734,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a.updateSEL(msg)
 		case screenFRU:
 			return a.updateFRU(msg)
+		case screenUsers:
+			return a.updateUsers(msg)
+		case screenFirmware:
+			return a.updateFirmware(msg)
+		case screenRedfish:
+			return a.updateRedfishEnum(msg)
+		case screenSOL:
+			return a.updateSOL(msg)
 		case screenAbout:
 			if msg.String() == "esc" || msg.String() == "q" {
 				a.currentScreen = screenResults
@@ -516,7 +767,7 @@ func (a *App) handleMenuAction(action string) (tea.Model, tea.Cmd) {
 		name := strings.TrimPrefix(action, "theme:")
 		SetTheme(name)
 		a.status = "Theme: " + name
-		_ = config.Save(config.Config{Theme: name, LastSubnet: a.lastSubnet})
+		_ = config.Save(config.Config{Theme: name, LastSubnet: a.lastSubnet, NVDAPIKey: a.nvdAPIKey})
 	}
 	return a, nil
 }
@@ -547,8 +798,11 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 			Theme:      CurrentTheme.Name,
 			LastSubnet: subnet,
 			LastPorts:  a.lastPorts,
+			NVDAPIKey:  a.nvdAPIKey,
 		})
 		a.scanning = true
+		a.hostsFound = 0
+		a.loadProgress = Progress{Total: discovery.CIDRHostCount(subnet)}
 		a.scanProgressCh = make(chan scanProgressMsg, 32)
 		a.status = fmt.Sprintf("Scanning %s (%s profile)", subnet, profile)
 		return a, tea.Batch(
@@ -614,6 +868,98 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 		a.ipmiLoading = true
 		a.status = "Ejecting virtual media from " + host.IP
 		return a, tea.Batch(a.spinner.Tick, runVMAction(host.IP, "", a.username, a.password, "eject"))
+
+	case "user-enable":
+		a.activeDialog = nil
+		if len(a.results) == 0 {
+			return a, nil
+		}
+		host := a.results[a.selectedHost].IP
+		a.ipmiLoading = true
+		a.status = fmt.Sprintf("Enabling user %d on %s", a.pendingUserID, host)
+		return a, tea.Batch(a.spinner.Tick, runUserEnable(host, a.username, a.password, a.pendingUserID))
+
+	case "user-disable":
+		a.activeDialog = nil
+		if len(a.results) == 0 {
+			return a, nil
+		}
+		host := a.results[a.selectedHost].IP
+		a.ipmiLoading = true
+		a.status = fmt.Sprintf("Disabling user %d on %s", a.pendingUserID, host)
+		return a, tea.Batch(a.spinner.Tick, runUserDisable(host, a.username, a.password, a.pendingUserID))
+
+	case "user-setpwd":
+		// Open the password sub-dialog; pendingUserID is already set.
+		a.activeDialog = NewSetPasswordDialog()
+		return a, textinput.Blink
+
+	case "user-setname":
+		// Find the current name for pre-fill.
+		currentName := ""
+		for _, u := range a.users {
+			if u.ID == a.pendingUserID {
+				currentName = u.Name
+				break
+			}
+		}
+		a.activeDialog = NewSetNameDialog(currentName)
+		return a, textinput.Blink
+
+	case "user-setpriv":
+		a.activeDialog = NewSetPrivilegeDialog()
+		return a, nil
+
+	case "user-setpwd-confirm":
+		dlg := a.activeDialog
+		a.activeDialog = nil
+		pw1 := dlg.InputValue(0)
+		pw2 := dlg.InputValue(1)
+		if pw1 == "" {
+			a.status = "Password cannot be empty"
+			a.currentScreen = screenUsers
+			return a, nil
+		}
+		if pw1 != pw2 {
+			a.status = "Passwords do not match"
+			a.currentScreen = screenUsers
+			return a, nil
+		}
+		if len(a.results) == 0 {
+			return a, nil
+		}
+		host := a.results[a.selectedHost].IP
+		a.ipmiLoading = true
+		a.status = fmt.Sprintf("Setting password for user %d on %s", a.pendingUserID, host)
+		return a, tea.Batch(a.spinner.Tick, runUserSetPassword(host, a.username, a.password, a.pendingUserID, pw1))
+
+	case "user-setname-confirm":
+		dlg := a.activeDialog
+		a.activeDialog = nil
+		name := dlg.InputValue(0)
+		if name == "" {
+			a.status = "Name cannot be empty"
+			a.currentScreen = screenUsers
+			return a, nil
+		}
+		if len(a.results) == 0 {
+			return a, nil
+		}
+		host := a.results[a.selectedHost].IP
+		a.ipmiLoading = true
+		a.status = fmt.Sprintf("Setting name for user %d on %s", a.pendingUserID, host)
+		return a, tea.Batch(a.spinner.Tick, runUserSetName(host, a.username, a.password, a.pendingUserID, name))
+
+	case "user-priv-2", "user-priv-3", "user-priv-4", "user-priv-5":
+		a.activeDialog = nil
+		if len(a.results) == 0 {
+			return a, nil
+		}
+		level, _ := strconv.Atoi(strings.TrimPrefix(action, "user-priv-"))
+		host := a.results[a.selectedHost].IP
+		a.ipmiLoading = true
+		a.status = fmt.Sprintf("Setting privilege level %d for user %d on %s", level, a.pendingUserID, host)
+		return a, tea.Batch(a.spinner.Tick, runUserSetPrivilege(host, a.username, a.password, a.pendingUserID, level))
 	}
 
 	return a, nil
@@ -717,14 +1063,52 @@ func (a *App) updateMCInfo(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		host := a.results[a.selectedHost].IP
-		cmd := ipmi.SOLCmd(host, a.username, a.password)
-		return a, tea.ExecProcess(cmd, func(err error) tea.Msg {
-			return solMsg{Err: err}
-		})
+		a.ipmiLoading = true
+		a.status = "Starting SOL session with " + host
+		cols := a.width
+		rows := a.contentH - 4
+		if cols < 80 {
+			cols = 80
+		}
+		if rows < 24 {
+			rows = 24
+		}
+		return a, tea.Batch(a.spinner.Tick, startSOLPane(host, a.username, a.password, cols, rows))
 
 	case "v":
 		a.activeDialog = NewVirtualMediaDialog()
 		return a, textinput.Blink
+
+	case "u":
+		if len(a.results) == 0 {
+			return a, nil
+		}
+		host := a.results[a.selectedHost].IP
+		a.ipmiLoading = true
+		a.status = "Loading users from " + host
+		return a, tea.Batch(a.spinner.Tick, runGetUsers(host, a.username, a.password))
+
+	case "c":
+		if len(a.results) == 0 {
+			return a, nil
+		}
+		host := a.results[a.selectedHost].IP
+		a.ipmiLoading = true
+		a.status = "Checking firmware compliance on " + host
+		return a, tea.Batch(a.spinner.Tick, runFirmwareCheck(host, a.username, a.password))
+
+	case "r":
+		if len(a.results) == 0 {
+			return a, nil
+		}
+		host := a.results[a.selectedHost]
+		if !host.HasRedfish {
+			a.status = "Redfish not detected on this host"
+			return a, nil
+		}
+		a.ipmiLoading = true
+		a.status = "Enumerating Redfish on " + host.IP
+		return a, tea.Batch(a.spinner.Tick, runRedfishEnum(host.IP, a.username, a.password))
 	}
 
 	return a, nil
@@ -817,6 +1201,146 @@ func (a *App) updateFRU(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
+/* ---------------- USERS ---------------- */
+
+func (a *App) updateUsers(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	visibleLines := a.contentH - 8
+	if visibleLines < 1 {
+		visibleLines = 5
+	}
+
+	switch msg.String() {
+	case "esc", "q":
+		a.currentScreen = screenMCInfo
+
+	case "up", "k":
+		if a.selectedUser > 0 {
+			a.selectedUser--
+			if a.selectedUser < a.usersOffset {
+				a.usersOffset = a.selectedUser
+			}
+		}
+
+	case "down", "j":
+		if a.selectedUser < len(a.users)-1 {
+			a.selectedUser++
+			if a.selectedUser >= a.usersOffset+visibleLines {
+				a.usersOffset = a.selectedUser - visibleLines + 1
+			}
+		}
+
+	case "enter":
+		if len(a.users) == 0 {
+			return a, nil
+		}
+		u := a.users[a.selectedUser]
+		a.pendingUserID = u.ID
+		a.activeDialog = NewUserActionDialog(u.ID, u.Name, u.Enabled)
+		return a, nil
+	}
+
+	return a, nil
+}
+
+/* ---------------- FIRMWARE ---------------- */
+
+func (a *App) updateFirmware(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Each CVE entry takes ~3 lines (ID+badge, description, blank).
+	maxOffset := len(a.firmwareAdvisory)*3 + 10
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+
+	switch msg.String() {
+	case "esc", "q":
+		a.currentScreen = screenMCInfo
+	case "up", "k":
+		if a.firmwareOffset > 0 {
+			a.firmwareOffset--
+		}
+	case "down", "j":
+		if a.firmwareOffset < maxOffset {
+			a.firmwareOffset++
+		}
+	}
+	return a, nil
+}
+
+/* ---------------- REDFISH ENUM ---------------- */
+
+func (a *App) updateRedfishEnum(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	visibleLines := a.contentH - 6
+	if visibleLines < 1 {
+		visibleLines = 5
+	}
+
+	totalLines := 0
+	if a.redfishEnum != nil {
+		totalLines = len(a.redfishEnum.Systems)*9 + len(a.redfishEnum.Managers)*5
+	}
+
+	maxOffset := totalLines - visibleLines
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+
+	switch msg.String() {
+	case "esc", "q":
+		a.currentScreen = screenMCInfo
+	case "up", "k":
+		if a.redfishOffset > 0 {
+			a.redfishOffset--
+		}
+	case "down", "j":
+		if a.redfishOffset < maxOffset {
+			a.redfishOffset++
+		}
+	}
+
+	return a, nil
+}
+
+/* ---------------- SOL ---------------- */
+
+func (a *App) updateSOL(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if a.solPane == nil {
+		return a, nil
+	}
+
+	half := (a.contentH - 4) / 2
+	if half < 1 {
+		half = 1
+	}
+
+	switch msg.String() {
+	case "f10":
+		a.solPane.close()
+		a.solPane = nil
+		a.currentScreen = screenMCInfo
+		a.status = "SOL session ended"
+		return a, nil
+
+	case "pgup", "shift+up":
+		a.solPane.scrollUp += half
+		return a, nil
+
+	case "pgdown", "shift+down":
+		a.solPane.scrollUp -= half
+		if a.solPane.scrollUp < 0 {
+			a.solPane.scrollUp = 0
+		}
+		return a, nil
+	}
+
+	// Forward everything else to the pty.
+	if b := keyToBytes(msg); len(b) > 0 {
+		a.solPane.write(b)
+		// New input: snap back to bottom so the user sees the response.
+		a.solPane.scrollUp = 0
+	}
+	return a, nil
+}
+
 /* ---------------- THEME ---------------- */
 
 func (a *App) CycleTheme() {
@@ -879,6 +1403,14 @@ func (a *App) View() string {
 				content = a.renderSEL()
 			case screenFRU:
 				content = a.renderFRU()
+			case screenUsers:
+				content = a.renderUsers()
+			case screenFirmware:
+				content = a.renderFirmware()
+			case screenRedfish:
+				content = a.renderRedfishEnum()
+			case screenSOL:
+				content = a.renderSOL()
 			case screenAbout:
 				content = a.aboutView()
 			default:
@@ -917,7 +1449,21 @@ func (a *App) View() string {
 	var left string
 	switch {
 	case a.scanning:
-		left = a.spinner.View() + " Scanning..."
+		if a.loadProgress.Total > 0 {
+			// Reserve space: right side + padding + "N found" suffix.
+			rw := lipgloss.Width(right) + 2
+			suffix := fmt.Sprintf("  %d found", a.hostsFound)
+			barWidth := a.width - rw - lipgloss.Width(suffix) - 18
+			if barWidth < 4 {
+				barWidth = 4
+			}
+			if barWidth > 20 {
+				barWidth = 20
+			}
+			left = a.spinner.View() + " " + a.loadProgress.RenderCompact(barWidth) + suffix
+		} else {
+			left = a.spinner.View() + " Scanning..."
+		}
 	case a.ipmiLoading:
 		left = a.spinner.View() + " Querying BMC..."
 	case misc.GlobalEgg.Active:
@@ -1071,7 +1617,7 @@ func (a *App) screenStatusHint() string {
 		return "[↑↓/jk] Navigate  [Tab] Expand  [Enter] Connect  [F9] Menu  [Q] Quit"
 
 	case screenMCInfo:
-		return "[S] Sensors  [L] Event Log  [F] FRU  [P] Power  [O] SOL  [V] VM  [ESC] Back"
+		return "[S] Sensors  [L] Log  [F] FRU  [U] Users  [C] Compliance  [R] Redfish  [P] Power  [O] SOL  [V] VM  [ESC] Back"
 
 	case screenSensor:
 		total := len(a.sensors)
@@ -1108,6 +1654,32 @@ func (a *App) screenStatusHint() string {
 		}
 		return fmt.Sprintf("Showing %d–%d of %d  [↑/k] Up  [↓/j] Down  [ESC] Back",
 			a.fruOffset+1, end, total)
+
+	case screenUsers:
+		total := len(a.users)
+		if total == 0 {
+			return "[ESC] Back"
+		}
+		return fmt.Sprintf("[%d/%d]  [↑/k] Up  [↓/j] Down  [Enter] Manage  [ESC] Back",
+			a.selectedUser+1, total)
+
+	case screenFirmware:
+		if a.advisoryLoading {
+			return a.spinner.View() + " Fetching advisory feed (NVD + CISA KEV)...  [ESC] Back"
+		}
+		if len(a.firmwareAdvisory) > 0 {
+			return fmt.Sprintf("%d CVE(s) shown  [↑/k] Up  [↓/j] Down  [ESC] Back", len(a.firmwareAdvisory))
+		}
+		return "[ESC] Back"
+
+	case screenSOL:
+		if a.solPane != nil && a.solPane.scrollUp > 0 {
+			return "[F10] Disconnect  [PgUp] Scroll up  [PgDn] Scroll down  (any key snaps to bottom)"
+		}
+		return "[F10] Disconnect  [PgUp] Scroll up  — all other keys forwarded to BMC"
+
+	case screenRedfish:
+		return "[↑/k] Up  [↓/j] Down  [ESC] Back"
 
 	case screenAbout:
 		return "[ESC] Back"
