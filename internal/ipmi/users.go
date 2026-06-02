@@ -51,6 +51,35 @@ func SetUserName(host, adminUser, adminPass string, userID int, name string) err
 	return err
 }
 
+// CreateUser provisions a previously empty slot: sets name, password,
+// enables the account, and applies the channel privilege level.
+// privilege: 2=USER, 3=OPERATOR, 4=ADMINISTRATOR, 5=OEM
+func CreateUser(host, adminUser, adminPass string, userID int, name, password string, privilege int) error {
+	defer wipeString(&password)
+	if err := SetUserName(host, adminUser, adminPass, userID, name); err != nil {
+		return fmt.Errorf("set name: %w", err)
+	}
+	if err := SetUserPassword(host, adminUser, adminPass, userID, password); err != nil {
+		return fmt.Errorf("set password: %w", err)
+	}
+	if err := EnableUser(host, adminUser, adminPass, userID); err != nil {
+		return fmt.Errorf("enable: %w", err)
+	}
+	if err := SetUserPrivilege(host, adminUser, adminPass, userID, 1, privilege); err != nil {
+		return fmt.Errorf("set privilege: %w", err)
+	}
+	return nil
+}
+
+// DeleteUser disables a user account and clears its name, effectively freeing
+// the slot. IPMI has no true delete command; this is the standard approach.
+func DeleteUser(host, adminUser, adminPass string, userID int) error {
+	if err := DisableUser(host, adminUser, adminPass, userID); err != nil {
+		return fmt.Errorf("disable: %w", err)
+	}
+	return SetUserName(host, adminUser, adminPass, userID, "")
+}
+
 // SetUserPrivilege sets the channel privilege level for a user.
 // level: 1=CALLBACK, 2=USER, 3=OPERATOR, 4=ADMINISTRATOR
 func SetUserPrivilege(host, adminUser, adminPass string, userID, channel, level int) error {

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/knightmare2600/fyrtaarn/internal/advisory"
 	"github.com/knightmare2600/fyrtaarn/internal/config"
+	"github.com/knightmare2600/fyrtaarn/internal/export"
 	"github.com/knightmare2600/fyrtaarn/internal/discovery"
 	"github.com/knightmare2600/fyrtaarn/internal/ipmi"
 	"github.com/knightmare2600/fyrtaarn/internal/misc"
@@ -109,6 +111,13 @@ type advisoryMsg struct {
 	Err      error
 }
 
+type exportMsg struct {
+	Path   string
+	Format string
+	Count  int
+	Err    error
+}
+
 /* ---------------- APP ---------------- */
 
 type App struct {
@@ -119,8 +128,10 @@ type App struct {
 	status   string
 	scanning bool
 
-	results      []discovery.HostResult
-	selectedHost int
+	results        []discovery.HostResult
+	selectedHost   int
+	resultsOffset  int
+	lastExportPath string
 
 	currentScreen screen
 
@@ -362,6 +373,20 @@ func runUserSetPrivilege(host, adminUser, adminPass string, userID, level int) t
 	}
 }
 
+func runUserCreate(host, adminUser, adminPass string, userID int, name, password string, privilege int) tea.Cmd {
+	return func() tea.Msg {
+		err := ipmi.CreateUser(host, adminUser, adminPass, userID, name, password, privilege)
+		return userActionMsg{Action: "create", Err: err}
+	}
+}
+
+func runUserDelete(host, adminUser, adminPass string, userID int) tea.Cmd {
+	return func() tea.Msg {
+		err := ipmi.DeleteUser(host, adminUser, adminPass, userID)
+		return userActionMsg{Action: "delete", Err: err}
+	}
+}
+
 func runFirmwareCheck(host, user, pass string) tea.Cmd {
 	return func() tea.Msg {
 		result, err := ipmi.CheckFirmwareCompliance(host, user, pass)
@@ -373,6 +398,19 @@ func runAdvisoryCheck(manufacturer, productName, apiKey string) tea.Cmd {
 	return func() tea.Msg {
 		findings, err := advisory.Check(manufacturer, productName, apiKey)
 		return advisoryMsg{Findings: findings, Err: err}
+	}
+}
+
+func runExportCmd(path, format string, results []discovery.HostResult) tea.Cmd {
+	return func() tea.Msg {
+		var err error
+		switch format {
+		case "csv":
+			err = export.WriteCSV(path, results)
+		case "json":
+			err = export.WriteJSON(path, results)
+		}
+		return exportMsg{Path: path, Format: format, Count: len(results), Err: err}
 	}
 }
 
@@ -456,6 +494,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.results = msg.Results
 		a.selectedHost = 0
+		a.resultsOffset = 0
 		a.treeExpanded = false
 		a.currentScreen = screenResults
 		a.status = fmt.Sprintf("Scan complete — %d hosts found", len(a.results))
@@ -674,6 +713,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.currentScreen = screenMCInfo
 		return a, nil
 
+	case exportMsg:
+		if msg.Err != nil {
+			a.status = "Export failed: " + msg.Err.Error()
+		} else {
+			a.status = fmt.Sprintf("Exported %d hosts (%s) → %s", msg.Count, strings.ToUpper(msg.Format), msg.Path)
+		}
+		return a, nil
+
 	case tea.KeyMsg:
 
 		if msg.String() == "ctrl+c" && a.currentScreen != screenSOL {
@@ -761,6 +808,13 @@ func (a *App) handleMenuAction(action string) (tea.Model, tea.Cmd) {
 	case action == "new-scan":
 		a.activeDialog = NewScanDialog(a.lastSubnet, util.IsRoot(), a.lastPorts)
 		return a, textinput.Blink
+	case action == "export":
+		if len(a.results) == 0 {
+			a.status = "Nothing to export — run a scan first"
+			return a, nil
+		}
+		a.activeDialog = NewExportDialog(a.lastExportPath)
+		return a, textinput.Blink
 	case action == "about":
 		a.currentScreen = screenAbout
 	case strings.HasPrefix(action, "theme:"):
@@ -780,6 +834,25 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 	case "cancel":
 		a.activeDialog = nil
 		return a, nil
+
+	case "export-csv", "export-json":
+		dlg := a.activeDialog
+		a.activeDialog = nil
+		path := strings.TrimSpace(dlg.InputValue(0))
+		if path == "" {
+			a.status = "Export path cannot be empty"
+			return a, nil
+		}
+		// Expand leading ~
+		if strings.HasPrefix(path, "~/") {
+			if home, err := os.UserHomeDir(); err == nil {
+				path = home + path[1:]
+			}
+		}
+		format := strings.TrimPrefix(action, "export-")
+		a.lastExportPath = path
+		a.status = fmt.Sprintf("Exporting %d hosts to %s...", len(a.results), path)
+		return a, runExportCmd(path, format, a.results)
 
 	case "scan-quick", "scan-standard", "scan-deep", "scan-custom":
 		dlg := a.activeDialog
@@ -960,6 +1033,71 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 		a.ipmiLoading = true
 		a.status = fmt.Sprintf("Setting privilege level %d for user %d on %s", level, a.pendingUserID, host)
 		return a, tea.Batch(a.spinner.Tick, runUserSetPrivilege(host, a.username, a.password, a.pendingUserID, level))
+
+	case "user-delete":
+		// Open confirmation dialog; pendingUserID already set.
+		name := ""
+		for _, u := range a.users {
+			if u.ID == a.pendingUserID {
+				name = u.Name
+				break
+			}
+		}
+		a.activeDialog = NewDeleteUserDialog(a.pendingUserID, name)
+		return a, nil
+
+	case "user-delete-confirm":
+		a.activeDialog = nil
+		if len(a.results) == 0 {
+			return a, nil
+		}
+		host := a.results[a.selectedHost].IP
+		a.ipmiLoading = true
+		a.status = fmt.Sprintf("Deleting user %d on %s", a.pendingUserID, host)
+		return a, tea.Batch(a.spinner.Tick, runUserDelete(host, a.username, a.password, a.pendingUserID))
+
+	case "user-create-2", "user-create-3", "user-create-4":
+		dlg := a.activeDialog
+		a.activeDialog = nil
+		name := dlg.InputValue(0)
+		pw1 := dlg.InputValue(1)
+		pw2 := dlg.InputValue(2)
+		if name == "" {
+			a.status = "Username cannot be empty"
+			a.currentScreen = screenUsers
+			return a, nil
+		}
+		if pw1 == "" {
+			a.status = "Password cannot be empty"
+			a.currentScreen = screenUsers
+			return a, nil
+		}
+		if pw1 != pw2 {
+			a.status = "Passwords do not match"
+			a.currentScreen = screenUsers
+			return a, nil
+		}
+		// Find first available (empty/disabled) slot.
+		slotID := 0
+		for _, u := range a.users {
+			if !u.Enabled && (u.Name == "" || u.Name == "(Empty User)") {
+				slotID = u.ID
+				break
+			}
+		}
+		if slotID == 0 {
+			a.status = "No free user slots available on this BMC"
+			a.currentScreen = screenUsers
+			return a, nil
+		}
+		if len(a.results) == 0 {
+			return a, nil
+		}
+		level, _ := strconv.Atoi(strings.TrimPrefix(action, "user-create-"))
+		host := a.results[a.selectedHost].IP
+		a.ipmiLoading = true
+		a.status = fmt.Sprintf("Creating user %q in slot %d on %s", name, slotID, host)
+		return a, tea.Batch(a.spinner.Tick, runUserCreate(host, a.username, a.password, slotID, name, pw1, level))
 	}
 
 	return a, nil
@@ -968,6 +1106,11 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 /* ---------------- RESULTS ---------------- */
 
 func (a *App) updateResults(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	visibleLines := a.contentH - 4
+	if visibleLines < 1 {
+		visibleLines = 5
+	}
+
 	switch msg.String() {
 
 	case "q":
@@ -976,11 +1119,17 @@ func (a *App) updateResults(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "up", "k":
 		if a.selectedHost > 0 {
 			a.selectedHost--
+			if a.selectedHost < a.resultsOffset {
+				a.resultsOffset = a.selectedHost
+			}
 		}
 
 	case "down", "j":
 		if a.selectedHost < len(a.results)-1 {
 			a.selectedHost++
+			if a.selectedHost >= a.resultsOffset+visibleLines {
+				a.resultsOffset = a.selectedHost - visibleLines + 1
+			}
 		}
 
 	case "tab":
@@ -991,7 +1140,6 @@ func (a *App) updateResults(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		host := a.results[a.selectedHost]
-		// Use cached credentials if we have a previous successful session.
 		if user, pass, ok := a.sessionCache.Get(host.IP); ok {
 			a.username = user
 			a.password = pass
@@ -1102,10 +1250,6 @@ func (a *App) updateMCInfo(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		host := a.results[a.selectedHost]
-		if !host.HasRedfish {
-			a.status = "Redfish not detected on this host"
-			return a, nil
-		}
 		a.ipmiLoading = true
 		a.status = "Enumerating Redfish on " + host.IP
 		return a, tea.Batch(a.spinner.Tick, runRedfishEnum(host.IP, a.username, a.password))
@@ -1237,6 +1381,10 @@ func (a *App) updateUsers(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.pendingUserID = u.ID
 		a.activeDialog = NewUserActionDialog(u.ID, u.Name, u.Enabled)
 		return a, nil
+
+	case "n":
+		a.activeDialog = NewCreateUserDialog()
+		return a, textinput.Blink
 	}
 
 	return a, nil
@@ -1499,33 +1647,46 @@ func (a *App) renderResults() string {
 		return b.String()
 	}
 
+	visibleLines := a.contentH - 4
+	if visibleLines < 1 {
+		visibleLines = 5
+	}
+	end := a.resultsOffset + visibleLines
+	if end > len(a.results) {
+		end = len(a.results)
+	}
+
 	b.WriteString("  │\n")
 
-	for i, h := range a.results {
-		isLast := i == len(a.results)-1
-		selected := i == a.selectedHost
+	rfStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(CurrentTheme.Accent)).
+		Faint(true)
+
+	for i, h := range a.results[a.resultsOffset:end] {
+		absIdx := a.resultsOffset + i
+		isLast := absIdx == len(a.results)-1
+		selected := absIdx == a.selectedHost
 
 		connector := "├─"
 		if isLast {
 			connector = "└─"
 		}
 
-		// Lighthouse glyph marks confirmed BMC hosts.
 		glyph := "   "
 		if h.IsBMC {
 			glyph = "⛯  "
 		}
 
-		// Redfish tag appended inline so it's visible without expanding.
+		// [RF] is purely informational — dim so it doesn't dominate the line.
 		rfTag := ""
 		if h.HasRedfish {
-			rfTag = " [RF]"
+			rfTag = " " + rfStyle.Render("[RF]")
 		}
 
-		line := fmt.Sprintf("  %s %s%s%s", connector, glyph, h.IP, rfTag)
+		line := fmt.Sprintf("  %s %s%s", connector, glyph, h.IP) + rfTag
 
 		if selected {
-			b.WriteString(MenuStyle(true).Render(line) + "\n")
+			b.WriteString(MenuStyle(true).Render(fmt.Sprintf("  %s %s%s", connector, glyph, h.IP)) + rfTag + "\n")
 		} else {
 			b.WriteString(line + "\n")
 		}
@@ -1548,6 +1709,10 @@ func (a *App) renderResults() string {
 			_, _, cached := a.sessionCache.Get(h.IP)
 			b.WriteString(fmt.Sprintf("     └─ session:    %s\n", boolCached(cached)))
 		}
+	}
+
+	if len(a.results) > end {
+		b.WriteString(fmt.Sprintf("  └─ ... %d more hosts\n", len(a.results)-end))
 	}
 
 	return b.String()
@@ -1614,7 +1779,20 @@ func (a *App) screenStatusHint() string {
 		if len(a.results) == 0 {
 			return "No hosts found — try a wider subnet or deeper scan profile"
 		}
-		return "[↑↓/jk] Navigate  [Tab] Expand  [Enter] Connect  [F9] Menu  [Q] Quit"
+		total := len(a.results)
+		visLines := a.contentH - 4
+		if visLines < 1 {
+			visLines = 5
+		}
+		hint := fmt.Sprintf("[%d/%d]  [↑↓/jk] Navigate  [Tab] Expand  [Enter] Connect  [F9] Menu  [Q] Quit", a.selectedHost+1, total)
+		if total > visLines {
+			end := a.resultsOffset + visLines
+			if end > total {
+				end = total
+			}
+			hint += fmt.Sprintf("  (showing %d–%d)", a.resultsOffset+1, end)
+		}
+		return hint
 
 	case screenMCInfo:
 		return "[S] Sensors  [L] Log  [F] FRU  [U] Users  [C] Compliance  [R] Redfish  [P] Power  [O] SOL  [V] VM  [ESC] Back"
@@ -1660,7 +1838,7 @@ func (a *App) screenStatusHint() string {
 		if total == 0 {
 			return "[ESC] Back"
 		}
-		return fmt.Sprintf("[%d/%d]  [↑/k] Up  [↓/j] Down  [Enter] Manage  [ESC] Back",
+		return fmt.Sprintf("[%d/%d]  [↑/k] Up  [↓/j] Down  [Enter] Manage  [N] New  [ESC] Back",
 			a.selectedUser+1, total)
 
 	case screenFirmware:

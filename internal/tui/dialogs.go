@@ -94,6 +94,30 @@ func NewVirtualMediaDialog() *Dialog {
 	}
 }
 
+// NewExportDialog prompts for an output path and format (CSV or JSON).
+func NewExportDialog(defaultPath string) *Dialog {
+	inp := textinput.New()
+	inp.Placeholder = "~/fyrtaarn-export.csv"
+	inp.Width = 50
+	if defaultPath != "" {
+		inp.SetValue(defaultPath)
+	}
+	inp.Focus()
+
+	return &Dialog{
+		Title:       "Export Inventory",
+		Body:        "Write discovered hosts to a file.\nCSV includes one row per host; JSON is an array of objects.",
+		inputs:      []textinput.Model{inp},
+		inputLabels: []string{"Output path"},
+		buttons: []DialogButton{
+			{Label: "CSV", Action: "export-csv"},
+			{Label: "JSON", Action: "export-json"},
+			{Label: "Cancel", Action: "cancel"},
+		},
+		focus: 0,
+	}
+}
+
 func NewLoginDialog(defaultUsername string) *Dialog {
 	user := textinput.New()
 	user.Placeholder = "admin"
@@ -156,6 +180,56 @@ func NewUserActionDialog(userID int, name string, enabled bool) *Dialog {
 			{Label: "Set Password", Action: "user-setpwd"},
 			{Label: "Set Name", Action: "user-setname"},
 			{Label: "Set Privilege", Action: "user-setpriv"},
+			{Label: "Delete", Action: "user-delete"},
+			{Label: "Cancel", Action: "cancel"},
+		},
+		focus: 0,
+	}
+}
+
+// NewCreateUserDialog prompts for the new account details.
+// Privilege is chosen via button action ("user-create-2" through "user-create-4").
+func NewCreateUserDialog() *Dialog {
+	nameInp := textinput.New()
+	nameInp.Placeholder = "username"
+	nameInp.Width = 20
+	nameInp.Focus()
+
+	pw1 := textinput.New()
+	pw1.Placeholder = "Password"
+	pw1.EchoMode = textinput.EchoPassword
+	pw1.EchoCharacter = '•'
+	pw1.Width = 30
+
+	pw2 := textinput.New()
+	pw2.Placeholder = "Confirm password"
+	pw2.EchoMode = textinput.EchoPassword
+	pw2.EchoCharacter = '•'
+	pw2.Width = 30
+
+	return &Dialog{
+		Title: "Create User",
+		Body:  "Choose privilege level via the buttons below:",
+		inputs: []textinput.Model{nameInp, pw1, pw2},
+		inputLabels: []string{"Username", "Password", "Confirm"},
+		buttons: []DialogButton{
+			{Label: "User (2)", Action: "user-create-2"},
+			{Label: "Operator (3)", Action: "user-create-3"},
+			{Label: "Admin (4)", Action: "user-create-4"},
+			{Label: "Cancel", Action: "cancel"},
+		},
+		focus: 0,
+	}
+}
+
+// NewDeleteUserDialog asks for explicit confirmation before wiping a slot.
+func NewDeleteUserDialog(userID int, name string) *Dialog {
+	return &Dialog{
+		Title:   fmt.Sprintf("Delete User %d — %s", userID, name),
+		Body:    fmt.Sprintf("This will disable user %d (%s) and clear the account name,\nfreeing the slot. The action cannot be undone.", userID, name),
+		Warning: "IPMI has no true delete — the slot is disabled and blanked.",
+		buttons: []DialogButton{
+			{Label: "Confirm Delete", Action: "user-delete-confirm"},
 			{Label: "Cancel", Action: "cancel"},
 		},
 		focus: 0,

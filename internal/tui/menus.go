@@ -49,6 +49,7 @@ func NewMenuBar() MenuBar {
 				Label: "File",
 				Items: []SubItem{
 					{Label: "New Scan", Action: "new-scan"},
+					{Label: "Export...", Action: "export"},
 					{Sep: true},
 					{Label: "Theme", Children: themeItems},
 					{Sep: true},

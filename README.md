@@ -62,8 +62,9 @@ The name reflects the project's purpose: visibility, remote control, and infrast
 - Reverse DNS resolution after scan (async, 2-second per-host timeout)
 - Redfish probe after scan — unauthenticated `GET /redfish/v1/` to detect Redfish hosts
 - Manufacturer and model fetched unauthenticated via `/redfish/v1/Systems/` where permitted
-- Lighthouse glyph ⛯ marks confirmed BMC hosts; `[RF]` tag marks Redfish-capable hosts
+- Lighthouse glyph ⛯ marks confirmed BMC hosts; `[RF]` tag (dim) marks Redfish-confirmed hosts — informational only, not a gate
 - Tree-view results with Tab-expandable host detail (hostname, vendor, confidence, IPMI version, hardware, session status)
+- Scrollable results tree with cursor tracking and `... N more hosts` footer on large subnets
 
 ### Authentication
 
@@ -100,9 +101,11 @@ The name reflects the project's purpose: visibility, remote control, and infrast
 
 ### User Management
 
-- **User list screen** — scrollable table of ID, name, enabled state, privilege level; `[U]` from BMC Info; cursor navigation with `[↑↓/jk]`; `[Enter]` opens per-user action dialog
+- **User list screen** — scrollable table of ID, name, enabled state, privilege level; `[U]` from BMC Info; cursor navigation with `[↑↓/jk]`; `[Enter]` opens per-user action dialog; `[N]` creates a new user
 - **User management dialogs** — enable/disable, set password (with confirmation), set username, set privilege level (User/Operator/Administrator/OEM); user list refreshes automatically after each action
-- Backend (`internal/ipmi/users.go`): `GetUsers`, `EnableUser`, `DisableUser`, `SetUserPassword`, `SetUserName`, `SetUserPrivilege`; passwords wiped from memory post-call
+- **Create user** — `[N]` from user list; picks the first free slot automatically; sets username, password (with confirmation), and privilege level in one dialog
+- **Delete user** — Delete button in the per-user action dialog; two-step confirmation; disables the account and clears the slot name (IPMI has no native delete command)
+- Backend (`internal/ipmi/users.go`): `GetUsers`, `CreateUser`, `DeleteUser`, `EnableUser`, `DisableUser`, `SetUserPassword`, `SetUserName`, `SetUserPrivilege`; passwords wiped from memory post-call
 
 ### Firmware Compliance
 
@@ -116,7 +119,7 @@ The name reflects the project's purpose: visibility, remote control, and infrast
 
 ### Redfish Full Enumeration
 
-- **Redfish screen** — scrollable Systems + Managers view; `[R]` from BMC Info (Redfish hosts only)
+- **Redfish screen** — scrollable Systems + Managers view; `[R]` from BMC Info (attempts on any host; surfaces a clean error if Redfish is not available)
 - Authenticated walk (`internal/redfish/enumerate.go`): Systems (manufacturer, model, serial, SKU, hostname, BIOS version, power state, CPU count, memory GiB) and Managers (firmware version, health, UUID)
 
 ---
@@ -131,8 +134,7 @@ The name reflects the project's purpose: visibility, remote control, and infrast
 
 ### Management
 
-- User create / delete from within the TUI (enable, disable, set-password, set-name, set-privilege are functional)
-- Firmware advisory feed covers broader vendor set and version-aware CPE matching
+- Firmware advisory feed: version-aware CPE matching and broader vendor coverage
 
 ### Virtual Media
 
@@ -296,6 +298,9 @@ sudo ./dist/fyrtaarn
 | PgUp        | SOL Console    | Scroll up through buffer       |
 | PgDn        | SOL Console    | Scroll down / snap to bottom   |
 | V           | BMC Info       | Virtual media dialog (Redfish) |
+| Enter       | User list      | Open action dialog for user    |
+| N           | User list      | Create new user                |
+| F9 > Export | Results        | Export inventory to CSV / JSON |
 | Esc / Q     | Most screens   | Back / quit                    |
 
 ---
@@ -378,9 +383,9 @@ For detailed technical writeups and excellent explanations of:
 
 ### Near Term
 
-- User create / delete from within the TUI (enable, disable, set-password, set-name, set-privilege now functional)
-- Version-aware CPE matching for advisory feed (currently returns all CVEs for the product family)
-- Redfish full enumeration for non-Redfish-flagged hosts (currently gated by `[RF]` detection)
+- Version-aware CPE matching for advisory feed (currently returns all CVEs for the product family regardless of firmware revision)
+- Broader vendor CPE coverage in advisory feed (Quanta and AMI entries are sparse in NVD)
+- Per-host cached data included in export (currently scan data only; mc info / Redfish details not retained between sessions)
 
 ### Longer Term
 
@@ -394,6 +399,20 @@ For detailed technical writeups and excellent explanations of:
 ---
 
 ## Changelog
+
+### 0.1.0
+
+- **Inventory export** — `File > Export...` writes all discovered hosts to disk; choose CSV (one row per host with header comment) or JSON (array of objects); path supports `~/` expansion; export is non-blocking and result appears in the status bar
+- **Scan results pagination** — discovery tree now scrolls on large subnets; cursor tracks correctly through `[↑↓/jk]`; status bar shows `[N/total]` and `(showing X–Y)` when the list overflows; `... N more hosts` footer visible at the bottom of a truncated list
+- **`[RF]` tag demoted to indicator** — tag is now rendered dim/faint in the accent colour rather than plain text, signalling "confirmed at scan time" rather than a gate; `[R]` Redfish enumeration works on any host regardless
+- `internal/export` package: `WriteCSV`, `WriteJSON`
+
+### 0.0.9
+
+- **User create** — `[N]` from the user list screen opens a create dialog; first free slot (disabled + blank name) is selected automatically; username, password (with confirmation), and privilege level (User/Operator/Administrator) set in one step; user list refreshes on success
+- **User delete** — Delete button added to the per-user action dialog; two-step confirmation with amber warning; disables the account and blanks the slot name (IPMI has no native delete command; this is the standard approach)
+- **Redfish on any host** — `[R]` from BMC Info now attempts Redfish enumeration regardless of whether the host was flagged `[RF]` at scan time; surfaces a clean error message if Redfish is unavailable rather than refusing silently
+- Backend additions: `ipmi.CreateUser`, `ipmi.DeleteUser`
 
 ### 0.0.8
 
