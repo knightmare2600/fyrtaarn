@@ -268,13 +268,30 @@ of their CVSS score.
 ## Build
 
 ```bash
-# Native build
+# Native build (current platform)
 make build
 # Output: dist/fyrtaarn
 
-# Cross-compile for ARM (example)
-GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -o bin/fyrtaarn-armv7 ./cmd/fyrtaarn
+# All cross-compilation targets in one shot
+make cross
 ```
+
+### Cross-compilation targets
+
+| Target | Make rule | Notes |
+|--------|-----------|-------|
+| Linux x86-64 | `make linux-amd64` | |
+| Linux ARM64 | `make linux-arm64` | Raspberry Pi 4+, Ampere, AWS Graviton |
+| Linux PowerPC64 BE | `make linux-ppc64` | G3/G4/G5 era PowerPC hardware |
+| Linux SPARC64 | `make linux-sparc64` | Sun/Oracle UltraSPARC |
+| Linux MIPS LE 32-bit | `make linux-mipsle` | softfloat; embedded routers, no FPU required |
+| Linux MIPS LE 64-bit | `make linux-mips64le` | softfloat |
+| Windows x64 | `make windows-amd64` | |
+| Windows ARM64 | `make windows-arm64` | Surface Pro X, Qualcomm Snapdragon laptops |
+
+All targets set `CGO_ENABLED=0` for fully static binaries. Version, commit, and build date are injected via ldflags from the current git state.
+
+Pre-built binaries for all targets are attached to each [GitHub Release](../../releases).
 
 ---
 
@@ -406,6 +423,21 @@ For detailed technical writeups and excellent explanations of:
 ---
 
 ## Changelog
+
+### 0.5.3
+
+- **Cross-platform release builds** — GitHub Actions release workflow builds and publishes pre-compiled binaries for all supported targets on every version tag: Linux amd64, arm64, ppc64 (G3/G4/G5 big-endian), sparc64 (Sun/Oracle UltraSPARC), mipsle/mips64le (softfloat); Windows amd64 and arm64; SHA256 checksum file included in every release
+- **Makefile cross-compilation** — `make cross` builds all 8 targets locally; individual `make linux-amd64`, `make linux-sparc64`, etc. rules for targeted builds; version/commit/builddate injected via ldflags from git state
+- **MC-style modal windows** — title embedded in top border line (`╭── Title ──╮`), drop shadow on right and bottom edges; consistent across all dialogs and loading screens; `renderModal()` centralises the chrome
+- **About as modal** — Help > About is now a proper centered modal overlay; `screenAbout` full-screen path retired
+- **Menu bar keyboard accelerators** — F9 activates bar; bare letter keys navigate: **F**ile / **H**elp at top level; **N**ew Scan / **E**xport / **T**heme / e**X**it / **A**bout in dropdowns; accelerator character rendered underlined
+- **Virtual media provider interface** — `VirtualMediaProvider` interface with per-vendor stub files (`ilo.go`, `drac.go`, `supermicro.go`, `lom.go`, `xcc.go`, `cimc.go`); each documents the vendor's protocol landscape and version quirks as TODOs; `NewProvider()` factory dispatches when backends are implemented
+- **Version-aware CPE matching** — firmware compliance tries an exact-version NVD query first; status bar shows `[version-specific]` or `[family-wide]`
+- **Enriched export** — CSV/JSON exports include full BMC detail columns for connected hosts (`firmware_revision`, `ipmi_version`, `bmc_mac`, `bmc_ip`, `bmc_gateway`)
+- **Broader vendor CPE coverage** — Cisco CIMC, Intel BMC, Huawei iBMC, Fujitsu iRMC added; AMI/Quanta query multiple NVD slugs and deduplicate
+- **IPMI username bug fix** — `parseUserList` correctly handles ipmitool rows where the Name column is absent
+- **Tree root `│` selectable** — cursor can sit on the root glyph before any host; `selectedHost = -1`
+- **Scan progress bar fix** — nmap `<taskprogress percent="..."/>` XML elements parsed correctly; bar advances in real time
 
 ### 0.1.2
 

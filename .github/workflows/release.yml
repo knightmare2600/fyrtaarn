@@ -5,63 +5,120 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: write
+
 jobs:
   build:
-    name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
+    name: Build ${{ matrix.binary }}
     runs-on: ubuntu-24.04
 
     strategy:
+      fail-fast: false
       matrix:
-        goos: [linux, windows, darwin]
-        goarch: [amd64, arm64]
+        include:
+          - goos: linux
+            goarch: amd64
+            binary: fyrtaarn-linux-amd64
+          - goos: linux
+            goarch: arm64
+            binary: fyrtaarn-linux-arm64
+          - goos: linux
+            goarch: ppc64
+            binary: fyrtaarn-linux-ppc64
+            note: "PowerPC 64-bit big-endian (G3/G4/G5 era)"
+          - goos: linux
+            goarch: sparc64
+            binary: fyrtaarn-linux-sparc64
+            note: "Sun/Oracle UltraSPARC"
+          - goos: linux
+            goarch: mipsle
+            gomips: softfloat
+            binary: fyrtaarn-linux-mipsle
+            note: "MIPS little-endian 32-bit, softfloat"
+          - goos: linux
+            goarch: mips64le
+            gomips64: softfloat
+            binary: fyrtaarn-linux-mips64le
+            note: "MIPS little-endian 64-bit, softfloat"
+          - goos: windows
+            goarch: amd64
+            binary: fyrtaarn-windows-amd64.exe
+          - goos: windows
+            goarch: arm64
+            binary: fyrtaarn-windows-arm64.exe
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.22"
 
-      - name: Download deps
+      - name: Download dependencies
         run: go mod download
 
-      - name: Build binaries
+      - name: Build
         env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
+          GOOS:        ${{ matrix.goos }}
+          GOARCH:      ${{ matrix.goarch }}
+          GOMIPS:      ${{ matrix.gomips }}
+          GOMIPS64:    ${{ matrix.gomips64 }}
           CGO_ENABLED: 0
         run: |
           mkdir -p dist
+          go build \
+            -ldflags "-X main.Version=${GITHUB_REF_NAME} \
+                      -X main.Commit=$(git rev-parse --short HEAD) \
+                      -X main.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o dist/${{ matrix.binary }} \
+            ./cmd/fyrtaarn
 
-          NAME="fyrtaarn-${GOOS}-${GOARCH}"
-          if [ "$GOOS" = "windows" ]; then
-            NAME="$NAME.exe"
-          fi
-
-          go build -ldflags "-X main.Version=${GITHUB_REF_NAME} -X main.Commit=$(git rev-parse --short HEAD) -X main.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            -o dist/$NAME ./cmd/fyrtaarn
-
-      - name: Upload artifacts
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: fyrtaarn-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/*
+          name: ${{ matrix.binary }}
+          path: dist/${{ matrix.binary }}
 
   release:
-    name: Create GitHub Release
+    name: Publish GitHub Release
     needs: build
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Download artifacts
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
+          merge-multiple: true
 
-      - name: Create Release
+      - name: Generate SHA256 checksums
+        run: |
+          cd dist
+          sha256sum fyrtaarn-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/**/*
-
+          draft: false
+          generate_release_notes: true
+          files: |
+            dist/fyrtaarn-linux-amd64
+            dist/fyrtaarn-linux-arm64
+            dist/fyrtaarn-linux-ppc64
+            dist/fyrtaarn-linux-sparc64
+            dist/fyrtaarn-linux-mipsle
+            dist/fyrtaarn-linux-mips64le
+            dist/fyrtaarn-windows-amd64.exe
+            dist/fyrtaarn-windows-arm64.exe
+            dist/SHA256SUMS.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

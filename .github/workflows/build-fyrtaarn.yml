@@ -8,16 +8,42 @@ on:
 
 jobs:
   build:
-    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    name: Build ${{ matrix.binary }}
     runs-on: ubuntu-24.04
 
     strategy:
+      fail-fast: false
       matrix:
-        goos: [linux, windows]
-        goarch: [amd64, arm64]
+        include:
+          - goos: linux
+            goarch: amd64
+            binary: fyrtaarn-linux-amd64
+          - goos: linux
+            goarch: arm64
+            binary: fyrtaarn-linux-arm64
+          - goos: linux
+            goarch: ppc64
+            binary: fyrtaarn-linux-ppc64
+          - goos: linux
+            goarch: sparc64
+            binary: fyrtaarn-linux-sparc64
+          - goos: linux
+            goarch: mipsle
+            gomips: softfloat
+            binary: fyrtaarn-linux-mipsle
+          - goos: linux
+            goarch: mips64le
+            gomips64: softfloat
+            binary: fyrtaarn-linux-mips64le
+          - goos: windows
+            goarch: amd64
+            binary: fyrtaarn-windows-amd64.exe
+          - goos: windows
+            goarch: arm64
+            binary: fyrtaarn-windows-arm64.exe
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Go
@@ -25,27 +51,27 @@ jobs:
         with:
           go-version: "1.22"
 
-      - name: Download Dependencies
+      - name: Download dependencies
         run: go mod download
 
-      - name: Build Binary
+      - name: Build
         env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
+          GOOS:        ${{ matrix.goos }}
+          GOARCH:      ${{ matrix.goarch }}
+          GOMIPS:      ${{ matrix.gomips }}
+          GOMIPS64:    ${{ matrix.gomips64 }}
           CGO_ENABLED: 0
         run: |
           mkdir -p dist
+          go build \
+            -ldflags "-X main.Version=$(git describe --tags --always --dirty) \
+                      -X main.Commit=$(git rev-parse --short HEAD) \
+                      -X main.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o dist/${{ matrix.binary }} \
+            ./cmd/fyrtaarn
 
-          NAME="fyrtaarn-${GOOS}-${GOARCH}"
-          if [ "$GOOS" = "windows" ]; then
-            NAME="$NAME.exe"
-          fi
-
-          go build -v -o dist/$NAME ./cmd/fyrtaarn
-
-      - name: Upload Artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: fyrtaarn-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/*
-
+          name: ${{ matrix.binary }}
+          path: dist/${{ matrix.binary }}
