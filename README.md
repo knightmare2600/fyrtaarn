@@ -293,6 +293,21 @@ All targets set `CGO_ENABLED=0` for fully static binaries. Version, commit, and 
 
 Pre-built binaries for all targets are attached to each [GitHub Release](../../releases).
 
+### Releasing
+
+Two paths to cut a release:
+
+**Button click (recommended)** — go to Actions → **Publish Release** → Run workflow; enter the version (e.g. `v0.5.3`) and optionally tick pre-release. GitHub builds all targets, creates the tag, generates `SHA256SUMS.txt`, and publishes the release automatically.
+
+**Command line** — push a version tag and `release.yml` fires:
+
+```bash
+git tag v0.5.3
+git push origin v0.5.3
+```
+
+Both paths produce identical output: 8 binaries + `SHA256SUMS.txt` attached to the release, release notes auto-generated from commits since the previous tag.
+
 ---
 
 ## Run
