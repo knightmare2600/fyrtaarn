@@ -30,11 +30,11 @@ jobs:
           - goos: linux
             goarch: mipsle
             gomips: softfloat
-            binary: fyrtaarn-linux-mipsle
+            binary: fyrtaarn-linux-mipsel
           - goos: linux
             goarch: mips64le
             gomips64: softfloat
-            binary: fyrtaarn-linux-mips64le
+            binary: fyrtaarn-linux-mips64el
           - goos: windows
             goarch: amd64
             binary: fyrtaarn-windows-amd64.exe

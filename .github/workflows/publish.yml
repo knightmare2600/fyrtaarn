@@ -48,11 +48,11 @@ jobs:
           - goos: linux
             goarch: mipsle
             gomips: softfloat
-            binary: fyrtaarn-linux-mipsle
+            binary: fyrtaarn-linux-mipsel
           - goos: linux
             goarch: mips64le
             gomips64: softfloat
-            binary: fyrtaarn-linux-mips64le
+            binary: fyrtaarn-linux-mips64el
           - goos: windows
             goarch: amd64
             binary: fyrtaarn-windows-amd64.exe
@@ -141,8 +141,8 @@ jobs:
             dist/fyrtaarn-linux-arm64
             dist/fyrtaarn-linux-ppc64
             dist/fyrtaarn-linux-sparc64
-            dist/fyrtaarn-linux-mipsle
-            dist/fyrtaarn-linux-mips64le
+            dist/fyrtaarn-linux-mipsel
+            dist/fyrtaarn-linux-mips64el
             dist/fyrtaarn-windows-amd64.exe
             dist/fyrtaarn-windows-arm64.exe
             dist/SHA256SUMS.txt

@@ -7,7 +7,7 @@ DATE    := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -X main.Version=$(VERSION) -X main.Commit=$(COMMIT) -X main.BuildDate=$(DATE)
 
 .PHONY: build run tidy clean cross \
-        linux-amd64 linux-arm64 linux-ppc64 linux-sparc64 linux-mipsle linux-mips64le \
+        linux-amd64 linux-arm64 linux-ppc64 linux-sparc64 linux-mipsel linux-mips64el \
         windows-amd64 windows-arm64
 
 # Native build (current platform)
@@ -48,17 +48,17 @@ linux-sparc64:
 	GOOS=linux GOARCH=sparc64 CGO_ENABLED=0 \
 		go build -ldflags "$(LDFLAGS)" -o $(DIST)/$(APP)-linux-sparc64 ./cmd/fyrtaarn
 
-# MIPS little-endian 32-bit — softfloat for maximum compatibility (no FPU required)
-linux-mipsle:
+# mipsel — MIPS little-endian 32-bit; softfloat for maximum compatibility (no FPU required)
+linux-mipsel:
 	mkdir -p $(DIST)
 	GOOS=linux GOARCH=mipsle GOMIPS=softfloat CGO_ENABLED=0 \
-		go build -ldflags "$(LDFLAGS)" -o $(DIST)/$(APP)-linux-mipsle ./cmd/fyrtaarn
+		go build -ldflags "$(LDFLAGS)" -o $(DIST)/$(APP)-linux-mipsel ./cmd/fyrtaarn
 
-# MIPS little-endian 64-bit — softfloat for maximum compatibility
-linux-mips64le:
+# mips64el — MIPS little-endian 64-bit; softfloat for maximum compatibility
+linux-mips64el:
 	mkdir -p $(DIST)
 	GOOS=linux GOARCH=mips64le GOMIPS64=softfloat CGO_ENABLED=0 \
-		go build -ldflags "$(LDFLAGS)" -o $(DIST)/$(APP)-linux-mips64le ./cmd/fyrtaarn
+		go build -ldflags "$(LDFLAGS)" -o $(DIST)/$(APP)-linux-mips64el ./cmd/fyrtaarn
 
 # ── Windows targets ───────────────────────────────────────────────────────────
 
@@ -74,4 +74,4 @@ windows-arm64:
 
 # ── All cross-compilation targets ─────────────────────────────────────────────
 
-cross: linux-amd64 linux-arm64 linux-ppc64 linux-sparc64 linux-mipsle linux-mips64le windows-amd64 windows-arm64
+cross: linux-amd64 linux-arm64 linux-ppc64 linux-sparc64 linux-mipsel linux-mips64el windows-amd64 windows-arm64

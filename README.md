@@ -284,8 +284,8 @@ make cross
 | Linux ARM64 | `make linux-arm64` | Raspberry Pi 4+, Ampere, AWS Graviton |
 | Linux PowerPC64 BE | `make linux-ppc64` | G3/G4/G5 era PowerPC hardware |
 | Linux SPARC64 | `make linux-sparc64` | Sun/Oracle UltraSPARC |
-| Linux MIPS LE 32-bit | `make linux-mipsle` | softfloat; embedded routers, no FPU required |
-| Linux MIPS LE 64-bit | `make linux-mips64le` | softfloat |
+| Linux mipsel (32-bit LE) | `make linux-mipsel` | softfloat; embedded routers, no FPU required |
+| Linux mips64el (64-bit LE) | `make linux-mips64el` | softfloat |
 | Windows x64 | `make windows-amd64` | |
 | Windows ARM64 | `make windows-arm64` | Surface Pro X, Qualcomm Snapdragon laptops |
 
@@ -441,7 +441,7 @@ For detailed technical writeups and excellent explanations of:
 
 ### 0.5.3
 
-- **Cross-platform release builds** — GitHub Actions release workflow builds and publishes pre-compiled binaries for all supported targets on every version tag: Linux amd64, arm64, ppc64 (G3/G4/G5 big-endian), sparc64 (Sun/Oracle UltraSPARC), mipsle/mips64le (softfloat); Windows amd64 and arm64; SHA256 checksum file included in every release
+- **Cross-platform release builds** — GitHub Actions release workflow builds and publishes pre-compiled binaries for all supported targets on every version tag: Linux amd64, arm64, ppc64 (G3/G4/G5 big-endian), sparc64 (Sun/Oracle UltraSPARC), mipsel/mips64el (softfloat); Windows amd64 and arm64; SHA256 checksum file included in every release
 - **Makefile cross-compilation** — `make cross` builds all 8 targets locally; individual `make linux-amd64`, `make linux-sparc64`, etc. rules for targeted builds; version/commit/builddate injected via ldflags from git state
 - **MC-style modal windows** — title embedded in top border line (`╭── Title ──╮`), drop shadow on right and bottom edges; consistent across all dialogs and loading screens; `renderModal()` centralises the chrome
 - **About as modal** — Help > About is now a proper centered modal overlay; `screenAbout` full-screen path retired
