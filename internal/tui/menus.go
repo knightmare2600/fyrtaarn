@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -10,6 +11,7 @@ import (
 // SubItem is a single entry in a dropdown menu.
 type SubItem struct {
 	Label    string
+	Accel    rune      // underlined accelerator letter; 0 = none
 	Action   string    // empty when Sep is true or Children is non-empty
 	Children []SubItem // non-empty makes this a submenu trigger
 	Sep      bool      // render as a horizontal separator line
@@ -18,6 +20,7 @@ type SubItem struct {
 // TopMenu is one top-level menu title with its dropdown items.
 type TopMenu struct {
 	Label string
+	Accel rune // underlined accelerator letter; 0 = none
 	Items []SubItem
 }
 
@@ -47,19 +50,21 @@ func NewMenuBar() MenuBar {
 		menus: []TopMenu{
 			{
 				Label: "File",
+				Accel: 'F',
 				Items: []SubItem{
-					{Label: "New Scan", Action: "new-scan"},
-					{Label: "Export...", Action: "export"},
+					{Label: "New Scan", Accel: 'N', Action: "new-scan"},
+					{Label: "Export...", Accel: 'E', Action: "export"},
 					{Sep: true},
-					{Label: "Theme", Children: themeItems},
+					{Label: "Theme", Accel: 'T', Children: themeItems},
 					{Sep: true},
-					{Label: "Exit", Action: "quit"},
+					{Label: "Exit", Accel: 'X', Action: "quit"},
 				},
 			},
 			{
 				Label: "Help",
+				Accel: 'H',
 				Items: []SubItem{
-					{Label: "About", Action: "about"},
+					{Label: "About", Accel: 'A', Action: "about"},
 				},
 			},
 		},
@@ -85,6 +90,25 @@ func skipSep(items []SubItem, focus, dir int) int {
 		next = (next + dir + n) % n
 	}
 	return focus
+}
+
+// renderLabel renders label using s, with the accelerator character underlined.
+// Falls back to s.Render(label) when accel is 0 or not present in label.
+func renderLabel(label string, accel rune, s lipgloss.Style) string {
+	if accel == 0 {
+		return s.Render(label)
+	}
+	runes := []rune(label)
+	target := unicode.ToLower(accel)
+	for i, r := range runes {
+		if unicode.ToLower(r) == target {
+			ul := s.Copy().Underline(true)
+			return s.Render(string(runes[:i])) +
+				ul.Render(string(runes[i:i+1])) +
+				s.Render(string(runes[i+1:]))
+		}
+	}
+	return s.Render(label)
 }
 
 func (m *MenuBar) currentItems() []SubItem {
@@ -234,6 +258,57 @@ func (m *MenuBar) Update(key string) (action string, consumed bool) {
 		return "", true
 	}
 
+	// Accelerator key: single character selects a menu title or item.
+	if len(key) == 1 {
+		r := unicode.ToLower([]rune(key)[0])
+		if !m.open {
+			// Top-level: jump to matching menu and open its dropdown.
+			for i, menu := range m.menus {
+				if menu.Accel != 0 && unicode.ToLower(menu.Accel) == r {
+					m.focus = i
+					m.open = true
+					m.subOpen = false
+					m.itemFocus = skipSep(m.currentItems(), -1, 1)
+					return "", true
+				}
+			}
+		} else if !m.subOpen {
+			// Dropdown open: activate matching item.
+			items := m.currentItems()
+			for i, item := range items {
+				if item.Sep || item.Accel == 0 {
+					continue
+				}
+				if unicode.ToLower(item.Accel) == r {
+					if len(item.Children) > 0 {
+						m.itemFocus = i
+						m.subOpen = true
+						m.subFocus = 0
+					} else {
+						act := item.Action
+						m.open = false
+						m.active = false
+						return act, true
+					}
+					return "", true
+				}
+			}
+		} else {
+			// Submenu open: activate matching child.
+			sub := m.currentSubItems()
+			for i, c := range sub {
+				if c.Accel != 0 && unicode.ToLower(c.Accel) == r {
+					act := c.Action
+					m.open = false
+					m.active = false
+					m.subOpen = false
+					m.subFocus = i
+					return act, true
+				}
+			}
+		}
+	}
+
 	// Any other key while active: consume without action.
 	return "", true
 }
@@ -260,9 +335,9 @@ func (m *MenuBar) RenderBar(width int) string {
 		isHighlighted := m.active && i == m.focus
 		var rendered string
 		if isHighlighted {
-			rendered = activeStyle.Render(menu.Label)
+			rendered = renderLabel(menu.Label, menu.Accel, activeStyle)
 		} else {
-			rendered = normalStyle.Render(menu.Label)
+			rendered = renderLabel(menu.Label, menu.Accel, normalStyle)
 		}
 		parts = append(parts, rendered)
 		currentX += len([]rune(menu.Label)) + 2 // +2 for Padding(0,1)
@@ -336,7 +411,7 @@ func (m *MenuBar) RenderDropdown() string {
 				lbl = fmt.Sprintf("%-*s", maxLen, item.Label)
 			}
 		}
-		mainLines = append(mainLines, MenuStyle(focused).Render(lbl))
+		mainLines = append(mainLines, renderLabel(lbl, item.Accel, MenuStyle(focused)))
 	}
 
 	mainBox := menuDropStyle().Render(strings.Join(mainLines, "\n"))
@@ -360,7 +435,7 @@ func (m *MenuBar) RenderDropdown() string {
 					check = "✓ "
 				}
 				lbl := fmt.Sprintf("%s%-*s", check, subMaxLen, c.Label)
-				subLines = append(subLines, MenuStyle(i == m.subFocus).Render(lbl))
+				subLines = append(subLines, renderLabel(lbl, c.Accel, MenuStyle(i == m.subFocus)))
 			}
 
 			subBox := menuDropStyle().Render(strings.Join(subLines, "\n"))
