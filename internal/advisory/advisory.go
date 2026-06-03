@@ -1,9 +1,10 @@
 // Package advisory queries the NIST NVD and CISA KEV catalog for known
-// vulnerabilities affecting BMC firmware. NVD lookups use the CPE 2.3
-// formatted-string-binding with a wildcard version component, so all CVEs for
-// the product family are returned regardless of specific firmware revision.
-// Results are sorted CVSS descending; actively-exploited entries (present in
-// the CISA KEV catalog) bubble to the top within each severity tier.
+// vulnerabilities affecting BMC firmware. When a firmware version is supplied,
+// a version-specific CPE is tried first against the primary vendor entry; if
+// NVD returns no results the query falls back to querying all CPE entries for
+// the vendor with a wildcard version, deduplicating across entries, so nothing
+// is silently missed. Results are sorted CVSS descending; actively-exploited
+// entries (present in the CISA KEV catalog) bubble to the top.
 package advisory
 
 import (
@@ -22,46 +23,75 @@ type CVEFinding struct {
 }
 
 // Check queries NVD (and CISA KEV for active-exploitation tagging) for known
-// vulnerabilities affecting the BMC described by manufacturer and productName.
+// vulnerabilities affecting the described BMC.
+//
+// firmwareVersion is the revision string from ipmitool mc info (e.g. "2.78").
+// When non-empty a version-specific CPE is tried first using the primary CPE
+// entry; if that returns no results all CPE entries for the vendor are queried
+// with a wildcard version and deduplicated.
+//
+// Returns (findings, versionSpecific, error). versionSpecific is true when
+// the results were narrowed to the exact firmware version.
+//
 // apiKey is optional; omit for unauthenticated access (5 req/30 s rate limit).
-// Returns up to 15 findings. Returns a descriptive error if the manufacturer
-// has no CPE mapping — callers should surface this as a non-fatal notice.
-func Check(manufacturer, productName, apiKey string) ([]CVEFinding, error) {
-	entry := lookupCPE(manufacturer, productName)
-	if entry == nil {
-		return nil, fmt.Errorf("no CPE mapping for %q — advisory lookup skipped", manufacturer)
+func Check(manufacturer, productName, firmwareVersion, apiKey string) ([]CVEFinding, bool, error) {
+	entries := lookupCPEs(manufacturer, productName)
+	if len(entries) == 0 {
+		return nil, false, fmt.Errorf("no CPE mapping for %q — advisory lookup skipped", manufacturer)
 	}
 
 	client := newNVDClient(apiKey)
-	cpe := cpeString(entry.vendor, entry.product)
 
-	raw, err := client.queryCPE(cpe)
-	if err != nil {
-		return nil, fmt.Errorf("NVD query failed: %w", err)
+	// Attempt a version-specific query against the primary entry first.
+	if ver := normalizeVersion(firmwareVersion); ver != "" {
+		cpe := cpeString(entries[0].vendor, entries[0].product, ver)
+		raw, err := client.queryCPE(cpe)
+		if err != nil {
+			return nil, false, fmt.Errorf("NVD query failed: %w", err)
+		}
+		if len(raw) > 0 {
+			return postProcess(raw), true, nil
+		}
+		// Zero results — version string may not match NVD's format; fall through.
 	}
 
-	if len(raw) == 0 {
-		return nil, nil
+	// Wildcard pass: query all CPE entries for the vendor and deduplicate.
+	seen := make(map[string]bool)
+	var merged []CVEFinding
+	for _, entry := range entries {
+		cpe := cpeString(entry.vendor, entry.product, "*")
+		raw, err := client.queryCPE(cpe)
+		if err != nil {
+			// Best-effort for secondary entries; propagate errors from the primary.
+			if entry == entries[0] {
+				return nil, false, fmt.Errorf("NVD query failed: %w", err)
+			}
+			continue
+		}
+		for _, f := range raw {
+			if !seen[f.ID] {
+				seen[f.ID] = true
+				merged = append(merged, f)
+			}
+		}
 	}
 
-	// Annotate with CISA KEV data (best-effort — failures are silently ignored
-	// inside kevContains).
+	return postProcess(merged), false, nil
+}
+
+// postProcess annotates findings with KEV data, sorts, and caps the slice.
+func postProcess(raw []CVEFinding) []CVEFinding {
 	for i := range raw {
 		raw[i].ActivelyExploited = kevContains(raw[i].ID)
 	}
-
-	// Sort: actively-exploited first, then by CVSS descending.
 	sort.Slice(raw, func(i, j int) bool {
 		if raw[i].ActivelyExploited != raw[j].ActivelyExploited {
 			return raw[i].ActivelyExploited
 		}
 		return raw[i].CVSS > raw[j].CVSS
 	})
-
-	// Cap to 15 to keep the compliance screen readable.
 	if len(raw) > 15 {
 		raw = raw[:15]
 	}
-
-	return raw, nil
+	return raw
 }

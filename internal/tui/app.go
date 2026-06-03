@@ -107,8 +107,9 @@ type userActionMsg struct {
 }
 
 type advisoryMsg struct {
-	Findings []advisory.CVEFinding
-	Err      error
+	Findings        []advisory.CVEFinding
+	VersionSpecific bool // true when results are filtered to the exact firmware version
+	Err             error
 }
 
 type exportMsg struct {
@@ -185,6 +186,7 @@ type App struct {
 
 	eggOffset      int
 	sessionCache   *session.Cache
+	detailsCache   map[string]*ipmi.HostDetails
 	scanProgressCh chan scanProgressMsg
 }
 
@@ -213,6 +215,7 @@ func NewApp() *App {
 		menuBar:       NewMenuBar(),
 		spinner:       sp,
 		sessionCache:  session.NewCache(),
+		detailsCache:  make(map[string]*ipmi.HostDetails),
 		lastSubnet:    lastSubnet,
 		lastPorts:     cfg.LastPorts,
 		nvdAPIKey:     cfg.NVDAPIKey,
@@ -394,21 +397,21 @@ func runFirmwareCheck(host, user, pass string) tea.Cmd {
 	}
 }
 
-func runAdvisoryCheck(manufacturer, productName, apiKey string) tea.Cmd {
+func runAdvisoryCheck(manufacturer, productName, firmwareVersion, apiKey string) tea.Cmd {
 	return func() tea.Msg {
-		findings, err := advisory.Check(manufacturer, productName, apiKey)
-		return advisoryMsg{Findings: findings, Err: err}
+		findings, versionSpecific, err := advisory.Check(manufacturer, productName, firmwareVersion, apiKey)
+		return advisoryMsg{Findings: findings, VersionSpecific: versionSpecific, Err: err}
 	}
 }
 
-func runExportCmd(path, format string, results []discovery.HostResult) tea.Cmd {
+func runExportCmd(path, format string, results []discovery.HostResult, details map[string]*ipmi.HostDetails) tea.Cmd {
 	return func() tea.Msg {
 		var err error
 		switch format {
 		case "csv":
-			err = export.WriteCSV(path, results)
+			err = export.WriteCSV(path, results, details)
 		case "json":
-			err = export.WriteJSON(path, results)
+			err = export.WriteJSON(path, results, details)
 		}
 		return exportMsg{Path: path, Format: format, Count: len(results), Err: err}
 	}
@@ -511,9 +514,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.currentScreen = screenResults
 			return a, nil
 		}
-		// Cache successful credentials for this host.
+		// Cache successful credentials and BMC details for this host.
 		if len(a.results) > 0 && a.selectedHost >= 0 {
-			a.sessionCache.Set(a.results[a.selectedHost].IP, a.username, a.password)
+			hostIP := a.results[a.selectedHost].IP
+			a.sessionCache.Set(hostIP, a.username, a.password)
+			a.detailsCache[hostIP] = &ipmi.HostDetails{MCInfo: msg.Info, LAN: msg.LAN, Chassis: msg.Chassis}
 		}
 		a.mcInfo = msg.Info
 		a.lanInfo = msg.LAN
@@ -612,7 +617,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.status = fmt.Sprintf("Firmware: %d heuristic issue(s) — checking advisory feed...", len(msg.Result.Issues))
 		}
 		a.advisoryLoading = true
-		return a, tea.Batch(a.spinner.Tick, runAdvisoryCheck(msg.Result.Info.ManufacturerName, msg.Result.Info.ProductName, a.nvdAPIKey))
+		return a, tea.Batch(a.spinner.Tick, runAdvisoryCheck(
+			msg.Result.Info.ManufacturerName,
+			msg.Result.Info.ProductName,
+			msg.Result.Info.FirmwareRevision,
+			a.nvdAPIKey,
+		))
 
 	case advisoryMsg:
 		a.advisoryLoading = false
@@ -632,14 +642,18 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				kev++
 			}
 		}
+		scope := "family-wide"
+		if msg.VersionSpecific {
+			scope = "version-specific"
+		}
 		if len(msg.Findings) == 0 && heurIssues == 0 {
-			a.status = "Firmware: compliant — no CVEs found"
+			a.status = fmt.Sprintf("Firmware: compliant — no CVEs found (%s)", scope)
 		} else if kev > 0 {
-			a.status = fmt.Sprintf("Firmware: %d CVE(s) (%d actively exploited), %d heuristic issue(s)",
-				len(msg.Findings), kev, heurIssues)
+			a.status = fmt.Sprintf("Firmware: %d CVE(s) (%d actively exploited), %d heuristic issue(s) [%s]",
+				len(msg.Findings), kev, heurIssues, scope)
 		} else {
-			a.status = fmt.Sprintf("Firmware: %d CVE(s), %d heuristic issue(s)",
-				len(msg.Findings), heurIssues)
+			a.status = fmt.Sprintf("Firmware: %d CVE(s), %d heuristic issue(s) [%s]",
+				len(msg.Findings), heurIssues, scope)
 		}
 		return a, nil
 
@@ -852,7 +866,7 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 		format := strings.TrimPrefix(action, "export-")
 		a.lastExportPath = path
 		a.status = fmt.Sprintf("Exporting %d hosts to %s...", len(a.results), path)
-		return a, runExportCmd(path, format, a.results)
+		return a, runExportCmd(path, format, a.results, a.detailsCache)
 
 	case "scan-quick", "scan-standard", "scan-deep", "scan-custom":
 		dlg := a.activeDialog
