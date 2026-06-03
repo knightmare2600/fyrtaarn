@@ -384,7 +384,6 @@ For detailed technical writeups and excellent explanations of:
 - native IPMI support in Go
 - SSH tunnelling support
 - VPN-aware workflows
-- inventory export
 - sensor dashboards
 - cluster / fleet operations
 
