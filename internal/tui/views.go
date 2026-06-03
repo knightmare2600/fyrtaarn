@@ -188,12 +188,19 @@ func (a *App) renderFRU() string {
 }
 
 func (a *App) renderLoading() string {
-	line := fmt.Sprintf("\n\n  %s  %s\n", a.spinner.View(), a.status)
-	if a.loadProgress.Total > 0 {
-		line += "\n  " + a.loadProgress.Render(a.width-4) + "\n"
+	title := "Loading"
+	if a.scanning {
+		title = "Scanning"
 	}
-	line += "\n  [Ctrl+C] Quit"
-	return line
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("\n  %s  %s\n", a.spinner.View(), a.status))
+	if a.loadProgress.Total > 0 {
+		b.WriteString("\n  " + a.loadProgress.Render(a.width-12) + "\n")
+	}
+	b.WriteString("\n  [Ctrl+C] Quit")
+
+	return renderModal(title, b.String(), a.width, a.contentH)
 }
 
 func boolYesNo(v bool) string {

@@ -354,6 +354,65 @@ func (d *Dialog) syncFocus() tea.Cmd {
 	return nil
 }
 
+// renderModal wraps body in a bordered modal window with title embedded in the
+// top border line, a drop shadow on the right and bottom, and centers the
+// result on the screen. All dialogs and the about box route through this so
+// the modal chrome is consistent across the application.
+func renderModal(title, body string, screenW, screenH int) string {
+	boxed := BorderStyle().Render(body)
+
+	lines := strings.Split(boxed, "\n")
+
+	// Inject the title into the top border line (╭── Title ──╮).
+	if len(lines) > 0 && title != "" {
+		topW := lipgloss.Width(lines[0])
+		titleStr := " " + title + " "
+		titleW := lipgloss.Width(titleStr)
+		dashTotal := topW - 2 - titleW // -2 for ╭ and ╮
+		if dashTotal < 2 {
+			dashTotal = 2
+		}
+		left := dashTotal / 2
+		right := dashTotal - left
+
+		borderSt := lipgloss.NewStyle().
+			Foreground(lipgloss.Color(CurrentTheme.Border))
+		titleSt := lipgloss.NewStyle().
+			Foreground(lipgloss.Color(CurrentTheme.Accent)).Bold(true)
+
+		lines[0] = borderSt.Render("╭"+strings.Repeat("─", left)) +
+			titleSt.Render(titleStr) +
+			borderSt.Render(strings.Repeat("─", right)+"╮")
+	}
+
+	// Drop shadow: single column to the right and one row below.
+	shadowSt := lipgloss.NewStyle().Foreground(lipgloss.Color("236"))
+	boxW := 0
+	if len(lines) > 0 {
+		boxW = lipgloss.Width(lines[0])
+	}
+	for i := 1; i < len(lines); i++ {
+		lines[i] += shadowSt.Render("▓")
+	}
+	lines = append(lines, "  "+shadowSt.Render(strings.Repeat("▓", boxW)))
+
+	modal := strings.Join(lines, "\n")
+
+	if screenW < 1 {
+		screenW = 80
+	}
+	if screenH < 1 {
+		screenH = 24
+	}
+
+	return lipgloss.Place(
+		screenW, screenH,
+		lipgloss.Center, lipgloss.Center,
+		modal,
+		lipgloss.WithWhitespaceBackground(lipgloss.Color(CurrentTheme.Background)),
+	)
+}
+
 func renderButton(label string, focused, disabled bool) string {
 	if disabled {
 		return lipgloss.NewStyle().
@@ -373,10 +432,49 @@ func renderButton(label string, focused, disabled bool) string {
 		Render("[ " + label + " ]")
 }
 
+// NewAboutDialog returns a modal dialog showing version info and dedications.
+func NewAboutDialog(version, commit, buildDate string) *Dialog {
+	accent := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(CurrentTheme.Accent)).Bold(true)
+
+	var b strings.Builder
+	b.WriteString("Nordic Out-of-Band Management Toolkit\n\n")
+	b.WriteString(fmt.Sprintf("  Version:     %s\n", version))
+	b.WriteString(fmt.Sprintf("  Commit:      %s\n", commit))
+	b.WriteString(fmt.Sprintf("  Build Date:  %s\n\n", buildDate))
+
+	b.WriteString(accent.Render("  Dedications") + "\n\n")
+
+	b.WriteString(accent.Render("  Dan Kaminsky") + "\n")
+	b.WriteString("  For pioneering work on BMC/IPMI security, remote management\n")
+	b.WriteString("  attack surfaces, and infrastructure visibility. His research\n")
+	b.WriteString("  exposed how dangerous and under-examined out-of-band systems\n")
+	b.WriteString("  could be. A small tribute remains in the code.\n\n")
+
+	b.WriteString(accent.Render("  IppSec") + "\n")
+	b.WriteString("  For educational walkthroughs and practical demonstrations.\n")
+	b.WriteString("  Trying your hardest to say Rødgrød med fløde... if you\n")
+	b.WriteString("  know, you know. ;)\n\n")
+
+	b.WriteString(accent.Render("  0xDF") + "\n")
+	b.WriteString("  For detailed technical writeups on post-exploitation,\n")
+	b.WriteString("  beyond-root methodologies, and operational enumeration.\n")
+	b.WriteString("  Jeg var at gå agurk med \"should\" på \"Release Comittee\" (:\n")
+
+	return &Dialog{
+		Title: "About Fyrtaarn",
+		Body:  b.String(),
+		buttons: []DialogButton{
+			{Label: "Close", Action: "cancel"},
+		},
+		focus: 0, // no inputs — focus lands directly on the Close button
+	}
+}
+
 func (d *Dialog) Render(w, h int) string {
 	var b strings.Builder
 
-	b.WriteString(HeaderStyle().Render(d.Title) + "\n\n")
+	// Title is rendered in the border line by renderModal — not in the body.
 
 	if d.Body != "" {
 		for _, line := range strings.Split(d.Body, "\n") {
@@ -417,19 +515,5 @@ func (d *Dialog) Render(w, h int) string {
 
 	b.WriteString("\n[Tab] Next  [Enter] Select  [Esc] Cancel")
 
-	boxed := BorderStyle().Render(b.String())
-
-	if w < 1 {
-		w = 80
-	}
-	if h < 1 {
-		h = 20
-	}
-
-	return lipgloss.Place(
-		w, h,
-		lipgloss.Center, lipgloss.Center,
-		boxed,
-		lipgloss.WithWhitespaceBackground(lipgloss.Color(CurrentTheme.Background)),
-	)
+	return renderModal(d.Title, b.String(), w, h)
 }

@@ -804,6 +804,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case screenSOL:
 			return a.updateSOL(msg)
 		case screenAbout:
+			// About is now an activeDialog — this case is unreachable but kept
+			// as a safety fallback.
 			if msg.String() == "esc" || msg.String() == "q" {
 				a.currentScreen = screenResults
 			}
@@ -830,7 +832,7 @@ func (a *App) handleMenuAction(action string) (tea.Model, tea.Cmd) {
 		a.activeDialog = NewExportDialog(a.lastExportPath)
 		return a, textinput.Blink
 	case action == "about":
-		a.currentScreen = screenAbout
+		a.activeDialog = NewAboutDialog(a.Version, a.Commit, a.BuildDate)
 	case strings.HasPrefix(action, "theme:"):
 		name := strings.TrimPrefix(action, "theme:")
 		SetTheme(name)
@@ -1907,8 +1909,6 @@ func (a *App) screenStatusHint() string {
 	case screenRedfish:
 		return "[↑/k] Up  [↓/j] Down  [ESC] Back"
 
-	case screenAbout:
-		return "[ESC] Back"
 	}
 
 	return a.status
