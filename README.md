@@ -112,6 +112,8 @@ The name reflects the project's purpose: visibility, remote control, and infrast
 - **Compliance screen** — `[C]` from BMC Info; two-pass check:
   1. Heuristic pass — IPMI 1.5 (CVE-2013-4782 class), empty firmware revision, factory `0.00` default
   2. Advisory feed pass — queries NIST NVD (CPE-matched) and CISA KEV (active-exploitation flag); runs concurrently after heuristics while the screen is already visible
+- **Version-aware CPE matching** — when a firmware revision is available, a version-specific NVD query is attempted first (returns only CVEs affecting that exact version); falls back to a product-family wildcard query if the version string is absent or unrecognised by NVD; status bar shows `[version-specific]` or `[family-wide]` to indicate which mode was used
+- Vendor CPE coverage: HP iLO (gen 3–6), Dell iDRAC (7/8/9), Supermicro IPMI, Oracle ILOM, Lenovo XCC, Cisco CIMC, Intel BMC, Huawei iBMC, Fujitsu iRMC, Quanta BMC, AMI MegaRAC (multi-slug vendors queried across all NVD entries and deduplicated)
 - CVEs shown with CVSS score, severity badge, and `⚠ KEV` marker if actively exploited in the wild
 - Up to 15 CVEs shown, sorted by CVSS descending with actively-exploited entries first
 - Scrollable (`[↑↓/jk]`) when CVE list overflows the screen
@@ -131,10 +133,6 @@ The name reflects the project's purpose: visibility, remote control, and infrast
 - LDAP
 - Active Directory
 - RADIUS
-
-### Management
-
-- Firmware advisory feed: version-aware CPE matching and broader vendor coverage
 
 ### Virtual Media
 
@@ -312,8 +310,8 @@ Active development — core discovery, authentication, and management workflows 
 Currently focused on:
 
 - provider-specific vendor implementations
-- Redfish full enumeration
-- user management
+- expanded Redfish coverage
+- fleet / cluster operations
 
 ---
 
@@ -381,12 +379,6 @@ For detailed technical writeups and excellent explanations of:
 
 ## TODO
 
-### Near Term
-
-- Version-aware CPE matching for advisory feed (currently returns all CVEs for the product family regardless of firmware revision)
-- Broader vendor CPE coverage in advisory feed (Quanta and AMI entries are sparse in NVD)
-- Per-host cached data included in export (currently scan data only; mc info / Redfish details not retained between sessions)
-
 ### Longer Term
 
 - native IPMI support in Go
@@ -399,6 +391,15 @@ For detailed technical writeups and excellent explanations of:
 ---
 
 ## Changelog
+
+### 0.1.1
+
+- **Version-aware CPE matching** — firmware compliance check (`[C]`) now tries a version-specific NVD CPE query first when a firmware revision is known; only falls back to a product-family wildcard if the version yields no results or is absent; status bar appends `[version-specific]` or `[family-wide]` so the scope is always visible
+- **Enriched export** — CSV and JSON exports now include BMC detail columns (`firmware_revision`, `ipmi_version`, `bmc_manufacturer`, `bmc_product`, `bmc_mac`, `bmc_ip`, `bmc_gateway`) for any host that was connected to during the session; JSON gets a nested `bmc_details` object; hosts never connected to export blank/omitted fields as before
+- **Broader vendor CPE coverage** — advisory feed now covers Cisco CIMC (queried under two NVD slugs), Intel BMC, Huawei iBMC, and Fujitsu iRMC; AMI MegaRAC and Quanta BMC now query multiple NVD product slugs and deduplicate by CVE ID to avoid duplicates
+- **IPMI username bug fix** — `parseUserList` now correctly handles ipmitool output rows where the Name column is absent (empty slot); previously the Callin boolean was being parsed as the username, causing new users to be created with `true` as their name
+- **Tree root `│` selectable** — the discovery tree root glyph is now a proper selection target; cursor can sit on `│` before moving down to the first host; `selectedHost = -1` represents this state
+- **Scan progress bar fix** — nmap `--stats-every 2s` emits `<taskprogress percent="..."/>` XML elements in the stdout stream (not plain text); added `parseXMLProgress` to extract these correctly; progress bar now advances in real time rather than jumping 0 → 100
 
 ### 0.1.0
 
