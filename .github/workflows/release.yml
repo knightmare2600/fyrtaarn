@@ -28,10 +28,6 @@ jobs:
             binary: fyrtaarn-linux-ppc64
             note: "PowerPC 64-bit big-endian (G3/G4/G5 era)"
           - goos: linux
-            goarch: sparc64
-            binary: fyrtaarn-linux-sparc64
-            note: "Sun/Oracle UltraSPARC"
-          - goos: linux
             goarch: mipsle
             gomips: softfloat
             binary: fyrtaarn-linux-mipsel
@@ -114,7 +110,6 @@ jobs:
             dist/fyrtaarn-linux-amd64
             dist/fyrtaarn-linux-arm64
             dist/fyrtaarn-linux-ppc64
-            dist/fyrtaarn-linux-sparc64
             dist/fyrtaarn-linux-mipsel
             dist/fyrtaarn-linux-mips64el
             dist/fyrtaarn-windows-amd64.exe

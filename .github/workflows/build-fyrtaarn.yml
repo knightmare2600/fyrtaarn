@@ -25,9 +25,6 @@ jobs:
             goarch: ppc64
             binary: fyrtaarn-linux-ppc64
           - goos: linux
-            goarch: sparc64
-            binary: fyrtaarn-linux-sparc64
-          - goos: linux
             goarch: mipsle
             gomips: softfloat
             binary: fyrtaarn-linux-mipsel

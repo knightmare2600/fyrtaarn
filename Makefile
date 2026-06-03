@@ -7,7 +7,7 @@ DATE    := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -X main.Version=$(VERSION) -X main.Commit=$(COMMIT) -X main.BuildDate=$(DATE)
 
 .PHONY: build run tidy clean cross \
-        linux-amd64 linux-arm64 linux-ppc64 linux-sparc64 linux-mipsel linux-mips64el \
+        linux-amd64 linux-arm64 linux-ppc64 linux-mipsel linux-mips64el \
         windows-amd64 windows-arm64
 
 # Native build (current platform)
@@ -42,12 +42,6 @@ linux-ppc64:
 	GOOS=linux GOARCH=ppc64 CGO_ENABLED=0 \
 		go build -ldflags "$(LDFLAGS)" -o $(DIST)/$(APP)-linux-ppc64 ./cmd/fyrtaarn
 
-# SPARC 64-bit — Sun/Oracle UltraSPARC hardware
-linux-sparc64:
-	mkdir -p $(DIST)
-	GOOS=linux GOARCH=sparc64 CGO_ENABLED=0 \
-		go build -ldflags "$(LDFLAGS)" -o $(DIST)/$(APP)-linux-sparc64 ./cmd/fyrtaarn
-
 # mipsel — MIPS little-endian 32-bit; softfloat for maximum compatibility (no FPU required)
 linux-mipsel:
 	mkdir -p $(DIST)
@@ -74,4 +68,4 @@ windows-arm64:
 
 # ── All cross-compilation targets ─────────────────────────────────────────────
 
-cross: linux-amd64 linux-arm64 linux-ppc64 linux-sparc64 linux-mipsel linux-mips64el windows-amd64 windows-arm64
+cross: linux-amd64 linux-arm64 linux-ppc64 linux-mipsel linux-mips64el windows-amd64 windows-arm64
