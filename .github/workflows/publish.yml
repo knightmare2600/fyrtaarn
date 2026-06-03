@@ -1,0 +1,150 @@
+name: Publish Release
+
+# Triggered only by a manual "Run workflow" click in the GitHub Actions UI.
+# Builds all targets, creates the git tag, and publishes the GitHub release
+# with binaries and a SHA256 checksum file attached.
+#
+# The existing release.yml remains available for tag-push releases from the
+# command line (git tag vX.Y.Z && git push origin vX.Y.Z). These two workflows
+# do not interfere — GITHUB_TOKEN tag pushes do not re-trigger other workflows.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version — include the v prefix (e.g. v0.5.3)"
+        required: true
+        type: string
+      prerelease:
+        description: "Mark as pre-release"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.binary }}
+    runs-on: ubuntu-24.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            binary: fyrtaarn-linux-amd64
+          - goos: linux
+            goarch: arm64
+            binary: fyrtaarn-linux-arm64
+          - goos: linux
+            goarch: ppc64
+            binary: fyrtaarn-linux-ppc64
+          - goos: linux
+            goarch: sparc64
+            binary: fyrtaarn-linux-sparc64
+          - goos: linux
+            goarch: mipsle
+            gomips: softfloat
+            binary: fyrtaarn-linux-mipsle
+          - goos: linux
+            goarch: mips64le
+            gomips64: softfloat
+            binary: fyrtaarn-linux-mips64le
+          - goos: windows
+            goarch: amd64
+            binary: fyrtaarn-windows-amd64.exe
+          - goos: windows
+            goarch: arm64
+            binary: fyrtaarn-windows-arm64.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build
+        env:
+          GOOS:        ${{ matrix.goos }}
+          GOARCH:      ${{ matrix.goarch }}
+          GOMIPS:      ${{ matrix.gomips }}
+          GOMIPS64:    ${{ matrix.gomips64 }}
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p dist
+          go build \
+            -ldflags "-X main.Version=${{ github.event.inputs.version }} \
+                      -X main.Commit=$(git rev-parse --short HEAD) \
+                      -X main.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o dist/${{ matrix.binary }} \
+            ./cmd/fyrtaarn
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.binary }}
+          path: dist/${{ matrix.binary }}
+
+  release:
+    name: Tag and Publish
+    needs: build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create and push tag
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$VERSION" -m "Release $VERSION"
+          git push origin "$VERSION"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256 checksums
+        run: |
+          cd dist
+          sha256sum fyrtaarn-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name:             ${{ github.event.inputs.version }}
+          name:                 Fyrtaarn ${{ github.event.inputs.version }}
+          prerelease:           ${{ github.event.inputs.prerelease }}
+          generate_release_notes: true
+          files: |
+            dist/fyrtaarn-linux-amd64
+            dist/fyrtaarn-linux-arm64
+            dist/fyrtaarn-linux-ppc64
+            dist/fyrtaarn-linux-sparc64
+            dist/fyrtaarn-linux-mipsle
+            dist/fyrtaarn-linux-mips64le
+            dist/fyrtaarn-windows-amd64.exe
+            dist/fyrtaarn-windows-arm64.exe
+            dist/SHA256SUMS.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
