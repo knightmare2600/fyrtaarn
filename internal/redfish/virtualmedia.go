@@ -4,11 +4,42 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 )
+
+// VirtualMediaProvider is the interface each vendor backend must satisfy.
+// Vendor-specific files (ilo.go, drac.go, supermicro.go, …) implement this;
+// genericProvider (this file) is the Redfish-standard fallback.
+type VirtualMediaProvider interface {
+	// Insert mounts an ISO image. isoURL must be reachable by the BMC itself
+	// (HTTP/HTTPS) — the BMC fetches the image, not the client.
+	Insert(isoURL string) error
+	// Eject unmounts the currently loaded virtual media.
+	Eject() error
+}
+
+// ErrNotImplemented is returned by vendor stubs pending a full backend.
+var ErrNotImplemented = errors.New("virtual media: vendor backend not yet implemented")
+
+// NewProvider returns the vendor-specific VirtualMediaProvider for the given
+// manufacturer and product strings (as returned by Redfish or ipmitool mc info).
+// Falls back to the generic Redfish walker when no specific vendor match exists.
+//
+// TODO: dispatch to vendor backends once implemented:
+//
+//	"hp" / "hpe"       → ilo.go   (iloProvider, generation detected from product string)
+//	"dell"             → drac.go  (idracProvider, gen 7/8/9 detected from product string)
+//	"supermicro"       → supermicro.go
+//	"oracle" / "sun"   → lom.go
+//	"lenovo"           → xcc.go
+//	"cisco"            → cimc.go
+func NewProvider(host, user, pass, manufacturer, _ string) VirtualMediaProvider {
+	return &genericProvider{host: host, user: user, pass: pass}
+}
 
 func httpClient() *http.Client {
 	return &http.Client{
@@ -19,14 +50,36 @@ func httpClient() *http.Client {
 	}
 }
 
-// InsertMedia mounts an ISO image via the Redfish VirtualMedia InsertMedia
-// action. It walks the Managers collection to discover the correct path rather
-// than hard-coding vendor-specific URLs.
+// InsertMedia mounts an ISO image. It delegates to NewProvider, which
+// currently falls through to the generic Redfish walker for all vendors.
+// Once vendor backends are implemented, callers should pass manufacturer and
+// product so the correct backend is selected.
 func InsertMedia(host, isoURL, user, pass string) error {
-	c := httpClient()
-	base := "https://" + host
+	return NewProvider(host, user, pass, "", "").Insert(isoURL)
+}
 
-	actionURL, err := findVMAction(c, base, user, pass, "InsertMedia")
+// EjectMedia unmounts the current virtual media. See InsertMedia.
+func EjectMedia(host, user, pass string) error {
+	return NewProvider(host, user, pass, "", "").Eject()
+}
+
+// genericProvider is the Redfish-standard fallback used until a vendor-specific
+// backend is written. It walks Managers → VirtualMedia and posts to the first
+// CD/DVD slot that advertises the requested action.
+//
+// Known limitation: slot discovery filters by "cd"/"dvd" in the @odata.id path,
+// which misses HP iLO (numeric paths) and any vendor that uses non-descriptive
+// paths. Fix: check the MediaTypes array in each VirtualMedia resource instead.
+// TODO: replace path sniffing with MediaTypes-based slot selection.
+type genericProvider struct {
+	host, user, pass string
+}
+
+func (p *genericProvider) Insert(isoURL string) error {
+	c := httpClient()
+	base := "https://" + p.host
+
+	actionURL, err := findVMAction(c, base, p.user, p.pass, "InsertMedia")
 	if err != nil {
 		return fmt.Errorf("could not locate Redfish VirtualMedia InsertMedia action: %w", err)
 	}
@@ -37,20 +90,19 @@ func InsertMedia(host, isoURL, user, pass string) error {
 		"WriteProtected": true,
 	})
 
-	return doPost(c, actionURL, user, pass, body)
+	return doPost(c, actionURL, p.user, p.pass, body)
 }
 
-// EjectMedia unmounts the current virtual media via the Redfish EjectMedia action.
-func EjectMedia(host, user, pass string) error {
+func (p *genericProvider) Eject() error {
 	c := httpClient()
-	base := "https://" + host
+	base := "https://" + p.host
 
-	actionURL, err := findVMAction(c, base, user, pass, "EjectMedia")
+	actionURL, err := findVMAction(c, base, p.user, p.pass, "EjectMedia")
 	if err != nil {
 		return fmt.Errorf("could not locate Redfish VirtualMedia EjectMedia action: %w", err)
 	}
 
-	return doPost(c, actionURL, user, pass, []byte("{}"))
+	return doPost(c, actionURL, p.user, p.pass, []byte("{}"))
 }
 
 // findVMAction discovers the URL for actionName (InsertMedia or EjectMedia)

@@ -136,8 +136,22 @@ The name reflects the project's purpose: visibility, remote control, and infrast
 
 ### Virtual Media
 
-- Floppy image support
+- Per-vendor backends — current implementation uses a generic Redfish walker
+  that works on iDRAC 9 and likely XCC but misses HP iLO (numeric slot paths)
+  and any vendor without Redfish VirtualMedia support:
+  - `ilo.go` — iLO 3/4 via RIBCL; iLO 5/6 via Redfish with MediaTypes-based slot
+    discovery and session-token auth
+  - `drac.go` — iDRAC 7/8 via WSMAN; iDRAC 9 Redfish + Dell OEM RemoteImage extension
+  - `supermicro.go` — AMI MegaRAC Redfish where available; detect IKVM-only firmware
+  - `lom.go` — Oracle ILOM 3.x (proprietary REST) and 4.x (Redfish where supported)
+  - `xcc.go` — Lenovo XCC Redfish with session management
+  - `cimc.go` — Cisco CIMC XML API 2.0 (no Redfish VirtualMedia surface)
+- Generic Redfish fallback: replace path-sniffing slot discovery with `MediaTypes`
+  array inspection so numeric and non-descriptive slot paths are found correctly
+- Floppy / USB image support
 - Remote media redirection
+- Surface BMC-reachability requirement to user (ISO URL must be accessible by the
+  BMC, not the client; currently not communicated in the mount dialog)
 
 ### Providers
 
