@@ -46,6 +46,8 @@ The name reflects the project's purpose: visibility, remote control, and infrast
 - Keyboard navigation and mouse support (cell-motion)
 - Menu bar (F9) — File > New Scan / Theme submenu / Exit; Help > About
 - Compact MC-style dropdown menus with submenu navigation
+- MC-style modal windows — all dialogs and popups rendered as centered bordered windows with the title embedded in the top border line (`╭── Title ──╮`) and a drop shadow; consistent chrome across scan dialog, login, export, power control, user management, virtual media, about, and loading screens
+- Menu bar keyboard accelerators — F9 activates the bar; bare letter keys navigate without Alt: **F**ile / **H**elp at top level; **N**ew Scan / **E**xport / **T**heme / e**X**it / **A**bout in dropdowns; accelerator character rendered underlined
 - Async spinner during all network operations
 - Status bar shows context-sensitive keyboard hints per screen with live pagination for scrollable views; shows "No scan performed" before the first scan runs
 - Chrome/content colour split: menu bar and status bar use their own foreground/background pair (`Chrome`/`ChromeFg`) independent of the content area, allowing light-chrome themes (Pan Am, Network SouthEast) to render correctly
@@ -404,6 +406,13 @@ For detailed technical writeups and excellent explanations of:
 ---
 
 ## Changelog
+
+### 0.1.2
+
+- **MC-style modal windows** — all dialogs and popups now render as proper centered modal windows: title embedded in the top border line (`╭── Title ──╮`), single-char drop shadow on right and bottom edges; consistent chrome across scan dialog, login, export, power control, user management, virtual media, and loading screens; `renderModal()` helper centralises the chrome so adding future dialogs is one call
+- **About as modal** — Help > About now opens as an `activeDialog` overlay rather than replacing the content area; Esc or Enter on Close dismisses it; `screenAbout` full-screen path retired
+- **Loading screen as modal** — scan and IPMI loading spinner/progress bar now appear in a centered `Scanning` / `Loading` modal rather than raw top-aligned text
+- **Menu bar keyboard accelerators** — F9 activates the bar; bare letter keys navigate without requiring Alt (which collides with Esc in terminals): **F**ile / **H**elp at top level; **N**ew Scan / **E**xport / **T**heme / e**X**it / **A**bout in dropdowns; accelerator character rendered underlined in place
 
 ### 0.1.1
 
