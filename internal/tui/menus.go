@@ -36,6 +36,10 @@ type MenuBar struct {
 
 	// Computed during RenderBar, used by RenderDropdown for x-positioning.
 	offsets []int
+
+	// Set by RenderDropdown; used by HandleMouse to hit-test the panels.
+	dropWidth int // screen-cell width of the main dropdown panel
+	subXOff   int // screen x where the submenu panel begins
 }
 
 // NewMenuBar builds the menu bar. Theme submenu is constructed dynamically.
@@ -102,10 +106,19 @@ func renderLabel(label string, accel rune, s lipgloss.Style) string {
 	target := unicode.ToLower(accel)
 	for i, r := range runes {
 		if unicode.ToLower(r) == target {
-			ul := s.Copy().Underline(true)
-			return s.Render(string(runes[:i])) +
+			// Strip padding for per-fragment renders — each s.Render() call would
+			// otherwise add its own left/right padding, creating visible gaps.
+			// Re-apply the original padding once around the combined result.
+			bare := s.Copy().UnsetPadding()
+			ul := bare.Copy().Underline(true)
+			content := bare.Render(string(runes[:i])) +
 				ul.Render(string(runes[i:i+1])) +
-				s.Render(string(runes[i+1:]))
+				bare.Render(string(runes[i+1:]))
+			return lipgloss.NewStyle().
+				Background(s.GetBackground()).
+				Padding(s.GetPaddingTop(), s.GetPaddingRight(),
+					s.GetPaddingBottom(), s.GetPaddingLeft()).
+				Render(content)
 		}
 	}
 	return s.Render(label)
@@ -416,6 +429,16 @@ func (m *MenuBar) RenderDropdown() string {
 
 	mainBox := menuDropStyle().Render(strings.Join(mainLines, "\n"))
 
+	// Record the main panel width before any submenu is joined (used by HandleMouse).
+	if firstLine := strings.SplitN(mainBox, "\n", 2); len(firstLine) > 0 {
+		m.dropWidth = lipgloss.Width(firstLine[0])
+	}
+	xOff := 0
+	if m.focus < len(m.offsets) {
+		xOff = m.offsets[m.focus]
+	}
+	m.subXOff = xOff + m.dropWidth
+
 	// Render submenu panel to the right when open.
 	if m.subOpen {
 		sub := m.currentSubItems()
@@ -444,10 +467,6 @@ func (m *MenuBar) RenderDropdown() string {
 	}
 
 	// Shift the combined box to sit under the correct menu title.
-	xOff := 0
-	if m.focus < len(m.offsets) {
-		xOff = m.offsets[m.focus]
-	}
 	if xOff > 0 {
 		bgPad := lipgloss.NewStyle().
 			Background(lipgloss.Color(CurrentTheme.Background)).
@@ -460,4 +479,90 @@ func (m *MenuBar) RenderDropdown() string {
 	}
 
 	return mainBox
+}
+
+// HandleMouse processes a left-click. Returns (action, consumed) like Update.
+// y=0 is the menu bar row; y>=1 is the content area where dropdowns are overlaid.
+func (m *MenuBar) HandleMouse(x, y int) (action string, consumed bool) {
+	if y == 0 {
+		// Hit-test each menu title in the bar.
+		for i, menu := range m.menus {
+			right := m.offsets[i] + len([]rune(menu.Label)) + 2 // +2 for Padding(0,1)
+			if x >= m.offsets[i] && x < right {
+				if m.active && m.focus == i && m.open {
+					// Second click on the same open title closes it.
+					m.active = false
+					m.open = false
+					m.subOpen = false
+				} else {
+					m.active = true
+					m.focus = i
+					m.open = true
+					m.subOpen = false
+					m.itemFocus = skipSep(m.currentItems(), -1, 1)
+				}
+				return "", true
+			}
+		}
+		// Clicked on the blank part of the bar.
+		if m.active {
+			m.active = false
+			m.open = false
+			m.subOpen = false
+			return "", true
+		}
+		return "", false
+	}
+
+	if !m.IsOpen() {
+		return "", false
+	}
+
+	// Dropdown starts at screen y=1 (top border), items at y=2.
+	itemLineY := y - 2
+	dropX := 0
+	if m.focus < len(m.offsets) {
+		dropX = m.offsets[m.focus]
+	}
+
+	if m.subOpen && x >= m.subXOff {
+		// Click inside the submenu panel.
+		sub := m.currentSubItems()
+		if itemLineY >= 0 && itemLineY < len(sub) {
+			act := sub[itemLineY].Action
+			m.open = false
+			m.active = false
+			m.subOpen = false
+			return act, true
+		}
+		return "", true
+	}
+
+	if x >= dropX && x < dropX+m.dropWidth {
+		// Click inside the main dropdown panel.
+		items := m.currentItems()
+		if itemLineY >= 0 && itemLineY < len(items) {
+			item := items[itemLineY]
+			if item.Sep {
+				return "", true
+			}
+			m.itemFocus = itemLineY
+			if len(item.Children) > 0 {
+				m.subOpen = true
+				m.subFocus = 0
+				return "", true
+			}
+			act := item.Action
+			m.open = false
+			m.active = false
+			return act, true
+		}
+		return "", true
+	}
+
+	// Clicked outside all panels: dismiss.
+	m.active = false
+	m.open = false
+	m.subOpen = false
+	return "", true
 }

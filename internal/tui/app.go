@@ -461,6 +461,15 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case tea.MouseMsg:
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+			action, _ := a.menuBar.HandleMouse(msg.X, msg.Y)
+			if action != "" {
+				return a.handleMenuAction(action)
+			}
+		}
+		return a, nil
+
 	case spinner.TickMsg:
 		if a.scanning || a.ipmiLoading || a.advisoryLoading {
 			var cmd tea.Cmd
