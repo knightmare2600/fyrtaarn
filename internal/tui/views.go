@@ -519,6 +519,14 @@ func (a *App) renderSOL() string {
 		displayLines = append(displayLines, pane.partial+"▌") // blinking cursor hint
 	}
 
+	// Connected but nothing received yet — the remote getty may simply be idle
+	// (system already booted, no active console output). Guide the user.
+	if len(displayLines) == 0 {
+		b.WriteString("\n  SOL session active — no output from serial console yet.\n")
+		b.WriteString("  If the system is already booted, press Enter to wake the remote terminal.\n")
+		return b.String()
+	}
+
 	visibleLines := a.contentH - 4 // header + divider + 2 padding rows
 	if visibleLines < 1 {
 		visibleLines = 5

@@ -765,13 +765,16 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, eggTick()
 		}
 
-		if msg.String() == "f2" {
+		// F2 and F9 are intercepted for the TUI chrome — but not in SOL mode
+		// where they must be forwarded to the remote console.
+		if msg.String() == "f2" && a.currentScreen != screenSOL {
 			a.CycleTheme()
 			return a, nil
 		}
 
 		// Menu bar takes priority: F9 or when already active.
-		if msg.String() == "f9" || a.menuBar.active {
+		// Skip in SOL mode so F9 reaches the BMC as \x1b[20~.
+		if a.currentScreen != screenSOL && (msg.String() == "f9" || a.menuBar.active) {
 			action, consumed := a.menuBar.Update(msg.String())
 			if action != "" {
 				return a.handleMenuAction(action)
