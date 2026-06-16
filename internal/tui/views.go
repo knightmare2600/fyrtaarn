@@ -512,19 +512,23 @@ func (a *App) renderSOL() string {
 
 	pane := a.solPane
 
-	// Snapshot lines + partial current line for rendering.
-	displayLines := make([]string, len(pane.lines))
-	copy(displayLines, pane.lines)
-	if pane.partial != "" {
-		displayLines = append(displayLines, pane.partial+"▌") // blinking cursor hint
-	}
-
-	// Connected but nothing received yet — the remote getty may simply be idle
-	// (system already booted, no active console output). Guide the user.
-	if len(displayLines) == 0 {
+	// Nothing written yet — the remote getty may be idle (system already booted).
+	if !pane.hasContent() {
 		b.WriteString("\n  SOL session active — no output from serial console yet.\n")
 		b.WriteString("  If the system is already booted, press Enter to wake the remote terminal.\n")
 		return b.String()
+	}
+
+	// Build combined history + screen lines and overlay the cursor.
+	displayLines := pane.allLines()
+	cursorIdx := len(pane.history) + pane.curRow
+	if cursorIdx < len(displayLines) {
+		line := []rune(displayLines[cursorIdx])
+		// Pad to cursor column if the line is shorter.
+		for len(line) <= pane.curCol {
+			line = append(line, ' ')
+		}
+		displayLines[cursorIdx] = string(line[:pane.curCol]) + "▌" + string(line[pane.curCol+1:])
 	}
 
 	visibleLines := a.contentH - 4 // header + divider + 2 padding rows
