@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"runtime"
 	"unicode/utf8"
@@ -23,7 +22,11 @@ type solReadMsg struct {
 	Err  error
 }
 
-type solDoneMsg struct{}
+// solDoneMsg carries the session generation so stale messages from a previous
+// session (whose pty was closed) are ignored if the user has already reconnected.
+type solDoneMsg struct {
+	gen int
+}
 
 /* ---------------- CONSTANTS ---------------- */
 
@@ -43,16 +46,22 @@ const (
 
 // solPane is a VT100-compatible screen buffer. It maintains a cols×rows grid
 // of runes, tracks cursor position, and processes escape sequences so that
-// applications that use cursor positioning (GRUB, vim, htop) render correctly.
+// applications using cursor positioning (GRUB, vim, htop) render correctly.
 type solPane struct {
 	ptmx *os.File
 	cols int
 	rows int
 
-	// Screen grid: grid[row][col], initialised to spaces.
+	// Screen grid: grid[row][col], space-filled.
 	grid   [][]rune
 	curRow int
 	curCol int
+
+	// pendingCR: a bare \r was received but not yet committed.
+	// If \n follows it is \r\n (CRLF); if anything else follows we emit an
+	// implicit \n first. This makes Award BIOS and firmware that send \r only
+	// render correctly without breaking normal \r\n / \n-only output.
+	pendingCR bool
 
 	// Scroll region (0-indexed, inclusive). Defaults to full screen.
 	scrollTop    int
@@ -132,16 +141,15 @@ func (s *solPane) write(b []byte) {
 
 /* ---------------- VT100 PARSER ---------------- */
 
-// ingest feeds raw pty output through the VT100 state machine, updating the
-// screen grid instead of stripping escape sequences.
+// ingest feeds raw pty output through the VT100 state machine.
 func (s *solPane) ingest(raw []byte) {
 	for len(raw) > 0 {
 		b := raw[0]
-		// In normal state, decode multi-byte UTF-8 runes so non-ASCII
-		// characters (e.g. box-drawing glyphs in GRUB themes) render correctly.
+		// In normal state, decode multi-byte UTF-8 runes (box-drawing glyphs etc).
 		if s.state == stateNormal && b >= 0x80 {
 			r, size := utf8.DecodeRune(raw)
 			if r != utf8.RuneError && size > 1 {
+				s.flushCR()
 				s.putChar(r)
 				raw = raw[size:]
 				continue
@@ -159,7 +167,6 @@ func (s *solPane) processByte(b byte) {
 	case stateEscape:
 		s.processEscape(b)
 	case stateCharset:
-		// Consume the single charset-designator byte after ESC ( / ESC ).
 		s.state = stateNormal
 	case stateCSI:
 		s.processCSI(b)
@@ -168,27 +175,55 @@ func (s *solPane) processByte(b byte) {
 	}
 }
 
+// flushCR commits a pending bare \r as an implicit \r\n.
+// Called before any byte that is not \n and not another \r.
+func (s *solPane) flushCR() {
+	if s.pendingCR {
+		s.pendingCR = false
+		s.curCol = 0
+		s.doLineFeed()
+	}
+}
+
 func (s *solPane) processNormal(b byte) {
 	switch {
 	case b == 0x1b:
+		s.flushCR()
 		s.state = stateEscape
+
 	case b == '\r':
-		s.curCol = 0
-	case b == '\n', b == 0x0b, b == 0x0c: // LF, VT, FF
+		// Don't commit yet — wait to see if \n follows.
+		// If another \r comes first, the previous one is CR-only → flush as CRLF.
+		s.flushCR()
+		s.pendingCR = true
+
+	case b == '\n', b == 0x0b, b == 0x0c: // LF / VT / FF
+		if s.pendingCR {
+			// \r\n pair: the \r moves to col 0, the \n advances the row.
+			s.pendingCR = false
+			s.curCol = 0
+		}
 		s.doLineFeed()
+
 	case b == '\b':
+		s.flushCR()
 		if s.curCol > 0 {
 			s.curCol--
 		}
+
 	case b == '\t':
+		s.flushCR()
 		next := ((s.curCol / 8) + 1) * 8
 		if next >= s.cols {
 			next = s.cols - 1
 		}
 		s.curCol = next
-	case b == 0x07: // BEL — ignore
+
+	case b == 0x07: // BEL — ignore (don't flush: BEL can precede \n in BIOS)
 	case b == 0x0e, b == 0x0f: // SO / SI — charset shift, ignore
+
 	case b >= 0x20:
+		s.flushCR()
 		s.putChar(rune(b))
 	}
 }
@@ -204,25 +239,24 @@ func (s *solPane) processEscape(b byte) {
 	case ']':
 		s.state = stateOSC
 	case '(', ')', '*', '+':
-		// Character set designation — next byte is the designator, discard it.
 		s.state = stateCharset
-	case '7': // save cursor (DEC)
+	case '7':
 		s.savedRow, s.savedCol = s.curRow, s.curCol
-	case '8': // restore cursor (DEC)
+	case '8':
 		s.curRow = clampInt(s.savedRow, 0, s.rows-1)
 		s.curCol = clampInt(s.savedCol, 0, s.cols-1)
-	case 'D': // index — like LF
+	case 'D':
 		s.doLineFeed()
-	case 'E': // next line
+	case 'E':
 		s.curCol = 0
 		s.doLineFeed()
-	case 'M': // reverse index — scroll down if at top of scroll region
+	case 'M': // reverse index
 		if s.curRow == s.scrollTop {
 			s.scrollRegionDown()
 		} else if s.curRow > 0 {
 			s.curRow--
 		}
-	case 'c': // full terminal reset
+	case 'c':
 		s.fullReset()
 	}
 }
@@ -230,7 +264,6 @@ func (s *solPane) processEscape(b byte) {
 func (s *solPane) processCSI(b byte) {
 	switch {
 	case b >= 0x40 && b <= 0x7e:
-		// Final byte — execute.
 		s.executeCSI(b)
 		s.state = stateNormal
 	case b == '?':
@@ -248,16 +281,13 @@ func (s *solPane) processCSI(b byte) {
 }
 
 func (s *solPane) processOSC(b byte) {
-	// OSC ends with BEL (0x07) or ESC \ (string terminator).
 	if b == 0x07 {
 		s.state = stateNormal
 	} else if b == 0x1b {
-		// The '\' that follows will be consumed as the next ESC sequence.
 		s.state = stateEscape
 	}
 }
 
-// param returns csiParams[n], or def if not present or zero.
 func (s *solPane) param(n, def int) int {
 	if n < len(s.csiParams) && s.csiParams[n] != 0 {
 		return s.csiParams[n]
@@ -267,26 +297,26 @@ func (s *solPane) param(n, def int) int {
 
 func (s *solPane) executeCSI(final byte) {
 	switch final {
-	case 'A': // cursor up
+	case 'A':
 		s.curRow = max(s.curRow-s.param(0, 1), s.scrollTop)
-	case 'B': // cursor down
+	case 'B':
 		s.curRow = min(s.curRow+s.param(0, 1), s.scrollBottom)
-	case 'C': // cursor forward
+	case 'C':
 		s.curCol = min(s.curCol+s.param(0, 1), s.cols-1)
-	case 'D': // cursor back
+	case 'D':
 		s.curCol = max(s.curCol-s.param(0, 1), 0)
-	case 'E': // cursor next line
+	case 'E':
 		s.curRow = min(s.curRow+s.param(0, 1), s.rows-1)
 		s.curCol = 0
-	case 'F': // cursor prev line
+	case 'F':
 		s.curRow = max(s.curRow-s.param(0, 1), 0)
 		s.curCol = 0
-	case 'G': // cursor horizontal absolute
+	case 'G':
 		s.curCol = clampInt(s.param(0, 1)-1, 0, s.cols-1)
-	case 'H', 'f': // cursor position (1-indexed)
+	case 'H', 'f':
 		s.curRow = clampInt(s.param(0, 1)-1, 0, s.rows-1)
 		s.curCol = clampInt(s.param(1, 1)-1, 0, s.cols-1)
-	case 'J': // erase display
+	case 'J':
 		switch s.param(0, 0) {
 		case 0:
 			s.eraseFromCursorToEnd()
@@ -295,7 +325,7 @@ func (s *solPane) executeCSI(final byte) {
 		case 2, 3:
 			s.eraseDisplay()
 		}
-	case 'K': // erase in line
+	case 'K':
 		switch s.param(0, 0) {
 		case 0:
 			for c := s.curCol; c < s.cols; c++ {
@@ -310,17 +340,17 @@ func (s *solPane) executeCSI(final byte) {
 				s.grid[s.curRow][c] = ' '
 			}
 		}
-	case 'L': // insert lines at cursor row
+	case 'L':
 		n := s.param(0, 1)
 		for i := 0; i < n; i++ {
 			s.insertLineAt(s.curRow)
 		}
-	case 'M': // delete lines at cursor row
+	case 'M':
 		n := s.param(0, 1)
 		for i := 0; i < n; i++ {
 			s.deleteLineAt(s.curRow)
 		}
-	case 'P': // delete characters
+	case 'P':
 		n := s.param(0, 1)
 		if s.curCol+n > s.cols {
 			n = s.cols - s.curCol
@@ -330,19 +360,19 @@ func (s *solPane) executeCSI(final byte) {
 		for c := s.cols - n; c < s.cols; c++ {
 			row[c] = ' '
 		}
-	case 'S': // scroll up n lines
+	case 'S':
 		n := s.param(0, 1)
 		for i := 0; i < n; i++ {
 			s.scrollRegionUp()
 		}
-	case 'T': // scroll down n lines
+	case 'T':
 		n := s.param(0, 1)
 		for i := 0; i < n; i++ {
 			s.scrollRegionDown()
 		}
-	case 'd': // line position absolute (1-indexed)
+	case 'd':
 		s.curRow = clampInt(s.param(0, 1)-1, 0, s.rows-1)
-	case 'r': // set scrolling region (1-indexed)
+	case 'r':
 		top := clampInt(s.param(0, 1)-1, 0, s.rows-1)
 		bot := clampInt(s.param(1, s.rows)-1, 0, s.rows-1)
 		if top < bot {
@@ -350,20 +380,19 @@ func (s *solPane) executeCSI(final byte) {
 			s.scrollBottom = bot
 			s.curRow, s.curCol = 0, 0
 		}
-	case 's': // save cursor
+	case 's':
 		s.savedRow, s.savedCol = s.curRow, s.curCol
-	case 'u': // restore cursor
+	case 'u':
 		s.curRow = clampInt(s.savedRow, 0, s.rows-1)
 		s.curCol = clampInt(s.savedCol, 0, s.cols-1)
-	case 'm': // SGR — strip colour/attribute sequences entirely
-	case 'h', 'l': // mode set/reset — ignore (includes ?25h cursor show/hide, ?7 wrap, ?1049 altscreen)
+	case 'm': // SGR — strip colour/attributes
+	case 'h', 'l': // mode set/reset — ignore
 	}
 }
 
 /* ---------------- SCREEN OPERATIONS ---------------- */
 
 func (s *solPane) putChar(r rune) {
-	// Auto-wrap when writing past the last column.
 	if s.curCol >= s.cols {
 		s.curCol = 0
 		s.doLineFeed()
@@ -380,8 +409,6 @@ func (s *solPane) doLineFeed() {
 	}
 }
 
-// scrollRegionUp scrolls the scroll region up by one line.
-// When the scroll region includes the top row, the departing line is saved to history.
 func (s *solPane) scrollRegionUp() {
 	if s.scrollTop == 0 {
 		s.history = append(s.history, rowToString(s.grid[0]))
@@ -389,18 +416,14 @@ func (s *solPane) scrollRegionUp() {
 			s.history = s.history[len(s.history)-solHistoryMax:]
 		}
 	}
-	// Shift rows up within the scroll region.
 	for r := s.scrollTop; r < s.scrollBottom; r++ {
 		copy(s.grid[r], s.grid[r+1])
 	}
-	// Blank the new bottom line.
 	for c := range s.grid[s.scrollBottom] {
 		s.grid[s.scrollBottom][c] = ' '
 	}
 }
 
-// scrollRegionDown inserts a blank line at the top of the scroll region,
-// pushing everything else down (the bottom line is lost).
 func (s *solPane) scrollRegionDown() {
 	for r := s.scrollBottom; r > s.scrollTop; r-- {
 		copy(s.grid[r], s.grid[r-1])
@@ -440,8 +463,6 @@ func (s *solPane) eraseFromStartToCursor() {
 	}
 }
 
-// insertLineAt inserts a blank line at the given row, shifting the scroll
-// region down and discarding the bottom line.
 func (s *solPane) insertLineAt(row int) {
 	if row > s.scrollBottom {
 		return
@@ -454,8 +475,6 @@ func (s *solPane) insertLineAt(row int) {
 	}
 }
 
-// deleteLineAt removes the line at the given row, shifting the scroll region
-// up and blanking the new bottom line.
 func (s *solPane) deleteLineAt(row int) {
 	if row > s.scrollBottom {
 		return
@@ -473,12 +492,12 @@ func (s *solPane) fullReset() {
 	s.curRow, s.curCol = 0, 0
 	s.scrollTop, s.scrollBottom = 0, s.rows-1
 	s.savedRow, s.savedCol = 0, 0
+	s.pendingCR = false
 }
 
-/* ---------------- RENDERING HELPERS ---------------- */
+/* ---------------- RENDERING / LOG HELPERS ---------------- */
 
-// allLines returns the combined history + current screen rows as plain strings,
-// ready for the renderer to paginate and display.
+// allLines returns history + current screen rows for the renderer.
 func (s *solPane) allLines() []string {
 	out := make([]string, 0, len(s.history)+s.rows)
 	out = append(out, s.history...)
@@ -488,7 +507,17 @@ func (s *solPane) allLines() []string {
 	return out
 }
 
-// hasContent returns true if anything non-blank has been written to the pane.
+// screenLines returns only the current live screen rows as strings.
+// Used when writing the final screen state to the session log.
+func (s *solPane) screenLines() []string {
+	lines := make([]string, s.rows)
+	for i, row := range s.grid {
+		lines[i] = rowToString(row)
+	}
+	return lines
+}
+
+// hasContent reports whether anything non-blank has been written to the pane.
 func (s *solPane) hasContent() bool {
 	if len(s.history) > 0 {
 		return true
@@ -503,7 +532,6 @@ func (s *solPane) hasContent() bool {
 	return false
 }
 
-// rowToString converts a grid row to a string, trimming trailing spaces.
 func rowToString(row []rune) string {
 	end := len(row)
 	for end > 0 && row[end-1] == ' ' {
@@ -543,8 +571,8 @@ func startSOLPane(host, user, pass string, cols, rows int) tea.Cmd {
 }
 
 // listenSOL blocks on one pty read and returns the result as a tea.Msg.
-// Re-issue after each solReadMsg to keep the read loop running.
-func listenSOL(ptmx *os.File) tea.Cmd {
+// gen identifies the session so stale done messages are discarded on reconnect.
+func listenSOL(ptmx *os.File, gen int) tea.Cmd {
 	return func() tea.Msg {
 		buf := make([]byte, 4096)
 		n, err := ptmx.Read(buf)
@@ -554,10 +582,7 @@ func listenSOL(ptmx *os.File) tea.Cmd {
 			return solReadMsg{Data: data}
 		}
 		if err != nil {
-			if err == io.EOF {
-				return solDoneMsg{}
-			}
-			return solDoneMsg{}
+			return solDoneMsg{gen: gen}
 		}
 		return solReadMsg{} // zero-byte read — retry
 	}
@@ -671,7 +696,6 @@ func keyToBytes(msg tea.KeyMsg) []byte {
 	return nil
 }
 
-// containsPlus reports whether s contains '+', used to detect modifier combos.
 func containsPlus(s string) bool {
 	for _, r := range s {
 		if r == '+' {

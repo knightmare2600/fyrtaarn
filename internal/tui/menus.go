@@ -56,8 +56,13 @@ func NewMenuBar() MenuBar {
 				Label: "File",
 				Accel: 'F',
 				Items: []SubItem{
+					{Label: "Connect to BMC", Accel: 'C', Action: "connect-bmc-dialog"},
+					{Sep: true},
 					{Label: "New Scan", Accel: 'N', Action: "new-scan"},
 					{Label: "Export...", Accel: 'E', Action: "export"},
+					{Sep: true},
+					{Label: "Start Log...", Accel: 'L', Action: "log-start-dialog"},
+					{Label: "Stop Log", Accel: 'S', Action: "log-stop"},
 					{Sep: true},
 					{Label: "Theme", Accel: 'T', Children: themeItems},
 					{Sep: true},

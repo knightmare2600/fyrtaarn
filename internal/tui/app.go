@@ -182,7 +182,10 @@ type App struct {
 	redfishEnum       *redfish.FullEnumeration
 	redfishOffset     int
 
-	solPane *solPane
+	solPane       *solPane
+	solGeneration int // incremented each session; guards stale solDoneMsg
+
+	sessionLog *os.File // nil when logging is off
 
 	eggOffset      int
 	sessionCache   *session.Cache
@@ -457,7 +460,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.width = msg.Width
 		a.height = msg.Height
 		if a.solPane != nil {
-			a.solPane.resize(msg.Width, msg.Height-2)
+			// Tell the pty about the actual visible content rows:
+			// height - 2 (menu+status bars) - 4 (SOL header/divider/padding).
+			a.solPane.resize(msg.Width-2, msg.Height-6)
 		}
 		return a, nil
 
@@ -510,6 +515,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.treeExpanded = false
 		a.currentScreen = screenResults
 		a.status = fmt.Sprintf("Scan complete — %d hosts found", len(a.results))
+		a.logf("Scan of %s complete — %d host(s) found", a.lastSubnet, len(a.results))
 		return a, nil
 
 	case mcInfoMsg:
@@ -534,6 +540,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.chassis = msg.Chassis
 		a.currentScreen = screenMCInfo
 		a.status = "BMC enumerated"
+		if len(a.results) > 0 && a.selectedHost >= 0 {
+			a.logf("Connected to %s — %s %s (FW %s)",
+				a.results[a.selectedHost].IP,
+				msg.Info.ManufacturerName, msg.Info.ProductName,
+				msg.Info.FirmwareRevision)
+		}
 		return a, nil
 
 	case sdrMsg:
@@ -693,13 +705,18 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case solPaneReadyMsg:
 		a.ipmiLoading = false
 		a.solPane = msg.pane
+		a.solGeneration++ // new session; stale solDoneMsg from previous session is ignored
 		a.currentScreen = screenSOL
 		a.status = "SOL active — [F10] disconnect  [PgUp/PgDn] scroll"
-		return a, listenSOL(msg.pane.ptmx)
+		hostIP := ""
+		if len(a.results) > 0 && a.selectedHost >= 0 {
+			hostIP = a.results[a.selectedHost].IP
+		}
+		a.logf("SOL session started — %s", hostIP)
+		return a, listenSOL(msg.pane.ptmx, a.solGeneration)
 
 	case solReadMsg:
 		if msg.Err != nil {
-			// Error starting the pane (e.g. pty fork failed).
 			a.ipmiLoading = false
 			a.status = "SOL error: " + msg.Err.Error()
 			a.currentScreen = screenMCInfo
@@ -709,12 +726,23 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil // pane was closed — discard stale read
 		}
 		if len(msg.Data) > 0 {
+			prevHistory := len(a.solPane.history)
 			a.solPane.ingest(msg.Data)
+			// Write any newly-scrolled-off lines to the session log.
+			if a.sessionLog != nil {
+				for i := prevHistory; i < len(a.solPane.history); i++ {
+					fmt.Fprintln(a.sessionLog, a.solPane.history[i])
+				}
+			}
 		}
-		return a, listenSOL(a.solPane.ptmx)
+		return a, listenSOL(a.solPane.ptmx, a.solGeneration)
 
 	case solDoneMsg:
+		if msg.gen != a.solGeneration {
+			return a, nil // stale — from a previous session whose pty was closed
+		}
 		if a.solPane != nil {
+			a.flushSOLLog()
 			a.solPane.close()
 			a.solPane = nil
 		}
@@ -747,7 +775,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 
 		if msg.String() == "ctrl+c" && a.currentScreen != screenSOL {
-			return a, tea.Quit
+			return a, a.quit()
 		}
 
 		if a.scanning || a.ipmiLoading {
@@ -832,7 +860,20 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (a *App) handleMenuAction(action string) (tea.Model, tea.Cmd) {
 	switch {
 	case action == "quit":
-		return a, tea.Quit
+		return a, a.quit()
+	case action == "connect-bmc-dialog":
+		a.activeDialog = NewConnectBMCDialog(a.username)
+		return a, textinput.Blink
+	case action == "log-start-dialog":
+		a.activeDialog = NewLogDialog()
+		return a, textinput.Blink
+	case action == "log-stop":
+		if a.sessionLog != nil {
+			a.logf("Session log stopped.")
+			_ = a.sessionLog.Close()
+			a.sessionLog = nil
+		}
+		a.status = "Session logging stopped"
 	case action == "new-scan":
 		a.activeDialog = NewScanDialog(a.lastSubnet, util.IsRoot(), a.lastPorts)
 		return a, textinput.Blink
@@ -1105,7 +1146,6 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 			a.currentScreen = screenUsers
 			return a, nil
 		}
-		// Find first available slot: disabled and no name set.
 		slotID := 0
 		for _, u := range a.users {
 			if !u.Enabled && u.Name == "" {
@@ -1126,9 +1166,108 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 		a.ipmiLoading = true
 		a.status = fmt.Sprintf("Creating user %q in slot %d on %s", name, slotID, host)
 		return a, tea.Batch(a.spinner.Tick, runUserCreate(host, a.username, a.password, slotID, name, pw1, level))
+
+	case "connect-bmc":
+		dlg := a.activeDialog
+		a.activeDialog = nil
+		ip := strings.TrimSpace(dlg.InputValue(0))
+		user := strings.TrimSpace(dlg.InputValue(1))
+		pass := dlg.InputValue(2)
+		if ip == "" {
+			a.status = "IP address required"
+			return a, nil
+		}
+		// Add the host to results if not already present, then connect directly.
+		targetIdx := -1
+		for i, r := range a.results {
+			if r.IP == ip {
+				targetIdx = i
+				break
+			}
+		}
+		if targetIdx < 0 {
+			a.results = append(a.results, discovery.HostResult{
+				IP:         ip,
+				IsBMC:      true,
+				Confidence: 100,
+				Vendor:     "Direct",
+			})
+			targetIdx = len(a.results) - 1
+		}
+		a.selectedHost = targetIdx
+		a.username = user
+		a.password = pass
+		a.ipmiLoading = true
+		a.status = "Connecting to " + ip
+		a.logf("Direct connect to %s as %s", ip, user)
+		return a, tea.Batch(a.spinner.Tick, runMCInfo(ip, user, pass))
+
+	case "log-start":
+		dlg := a.activeDialog
+		a.activeDialog = nil
+		path := strings.TrimSpace(dlg.InputValue(0))
+		if path == "" {
+			a.status = "Log path cannot be empty"
+			return a, nil
+		}
+		if strings.HasPrefix(path, "~/") {
+			if home, err := os.UserHomeDir(); err == nil {
+				path = home + path[1:]
+			}
+		}
+		if a.sessionLog != nil {
+			_ = a.sessionLog.Close()
+		}
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if err != nil {
+			a.status = "Log error: " + err.Error()
+			return a, nil
+		}
+		a.sessionLog = f
+		fmt.Fprintf(a.sessionLog, "Fyrtaarn Session Log\nStarted: %s\n%s\n\n",
+			time.Now().Format(time.RFC3339), strings.Repeat("=", 60))
+		a.status = "Session logging → " + path
+		a.logf("Session log started.")
+		return a, nil
 	}
 
 	return a, nil
+}
+
+/* ---------------- HELPERS ---------------- */
+
+// quit closes the session log (if open) and returns tea.Quit.
+func (a *App) quit() tea.Cmd {
+	if a.sessionLog != nil {
+		a.logf("Fyrtaarn exited.")
+		_ = a.sessionLog.Close()
+		a.sessionLog = nil
+	}
+	return tea.Quit
+}
+
+// logf writes a timestamped entry to the session log if logging is active.
+func (a *App) logf(format string, args ...any) {
+	if a.sessionLog == nil {
+		return
+	}
+	fmt.Fprintf(a.sessionLog, "[%s] %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
+}
+
+// flushSOLLog writes the current SOL screen content to the log and marks the
+// end of the SOL session. Called before closing a pane (F10 or natural end).
+func (a *App) flushSOLLog() {
+	if a.sessionLog == nil || a.solPane == nil {
+		return
+	}
+	for _, line := range a.solPane.screenLines() {
+		fmt.Fprintln(a.sessionLog, line)
+	}
+	hostIP := ""
+	if len(a.results) > 0 && a.selectedHost >= 0 {
+		hostIP = a.results[a.selectedHost].IP
+	}
+	a.logf("SOL session ended — %s", hostIP)
 }
 
 /* ---------------- RESULTS ---------------- */
@@ -1142,7 +1281,7 @@ func (a *App) updateResults(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 
 	case "q":
-		return a, tea.Quit
+		return a, a.quit()
 
 	case "up", "k":
 		if a.selectedHost > 0 {
@@ -1246,8 +1385,9 @@ func (a *App) updateMCInfo(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		host := a.results[a.selectedHost].IP
 		a.ipmiLoading = true
+		a.loadProgress = Progress{} // clear any stale scan bar
 		a.status = "Starting SOL session with " + host
-		cols := a.width
+		cols := a.width - 2 // match the maxWidth clip in renderSOL
 		rows := a.contentH - 4
 		if cols < 80 {
 			cols = 80
@@ -1496,6 +1636,7 @@ func (a *App) updateSOL(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "f10":
+		a.flushSOLLog()
 		a.solPane.close()
 		a.solPane = nil
 		a.currentScreen = screenMCInfo

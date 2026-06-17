@@ -432,6 +432,60 @@ func renderButton(label string, focused, disabled bool) string {
 		Render("[ " + label + " ]")
 }
 
+// NewConnectBMCDialog prompts for a BMC IP and credentials to connect directly,
+// bypassing the discovery scan.
+func NewConnectBMCDialog(defaultUsername string) *Dialog {
+	ipInp := textinput.New()
+	ipInp.Placeholder = "192.168.1.100"
+	ipInp.Width = 25
+	ipInp.Focus()
+
+	userInp := textinput.New()
+	userInp.Placeholder = "admin"
+	userInp.Width = 20
+	if defaultUsername != "" {
+		userInp.SetValue(defaultUsername)
+	}
+
+	passInp := textinput.New()
+	passInp.Placeholder = "password"
+	passInp.EchoMode = textinput.EchoPassword
+	passInp.EchoCharacter = '•'
+	passInp.Width = 20
+
+	return &Dialog{
+		Title:       "Connect to BMC",
+		Body:        "Connect directly to a known BMC — no scan required.",
+		inputs:      []textinput.Model{ipInp, userInp, passInp},
+		inputLabels: []string{"IP Address", "Username", "Password"},
+		buttons: []DialogButton{
+			{Label: "Connect", Action: "connect-bmc"},
+			{Label: "Cancel", Action: "cancel"},
+		},
+		focus: 0,
+	}
+}
+
+// NewLogDialog prompts for a file path to write the session log to.
+func NewLogDialog() *Dialog {
+	inp := textinput.New()
+	inp.Placeholder = "~/fyrtaarn-session.log"
+	inp.Width = 50
+	inp.Focus()
+
+	return &Dialog{
+		Title:       "Start Session Log",
+		Body:        "Log all activity to a plain-text file.\nSOL output is captured as rendered screen text.",
+		inputs:      []textinput.Model{inp},
+		inputLabels: []string{"Log file path"},
+		buttons: []DialogButton{
+			{Label: "Start Logging", Action: "log-start"},
+			{Label: "Cancel", Action: "cancel"},
+		},
+		focus: 0,
+	}
+}
+
 // NewAboutDialog returns a modal dialog showing version info and dedications.
 func NewAboutDialog(version, commit, buildDate string) *Dialog {
 	accent := lipgloss.NewStyle().
