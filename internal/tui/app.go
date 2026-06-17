@@ -182,8 +182,9 @@ type App struct {
 	redfishEnum       *redfish.FullEnumeration
 	redfishOffset     int
 
-	solPane       *solPane
-	solGeneration int // incremented each session; guards stale solDoneMsg
+	solPane        *solPane
+	solGeneration  int  // incremented each session; guards stale solDoneMsg
+	solAfterPower  bool // when true, powerMsg "on" chains into SOL connect
 
 	sessionLog *os.File // nil when logging is off
 
@@ -695,10 +696,24 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case powerMsg:
 		a.ipmiLoading = false
 		if msg.Err != nil {
+			a.solAfterPower = false
 			a.status = "Power error: " + msg.Err.Error()
-		} else {
-			a.status = fmt.Sprintf("Power %s: command sent", msg.Action)
+			a.currentScreen = screenMCInfo
+			return a, nil
 		}
+		// If the user chose "Power On + Open SOL", chain straight into SOL so
+		// they catch the full boot sequence from BIOS onwards.
+		if msg.Action == "on" && a.solAfterPower {
+			a.solAfterPower = false
+			host := a.results[a.selectedHost].IP
+			a.ipmiLoading = true
+			a.loadProgress = Progress{}
+			a.status = "Power on sent — opening SOL console on " + host + "..."
+			cols := max(a.width-2, 80)
+			rows := max(a.contentH-4, 24)
+			return a, tea.Batch(a.spinner.Tick, startSOLPane(host, a.username, a.password, cols, rows))
+		}
+		a.status = fmt.Sprintf("Power %s: command sent", msg.Action)
 		a.currentScreen = screenMCInfo
 		return a, nil
 
@@ -966,6 +981,18 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 		a.status = "Enumerating " + host.IP
 		a.ipmiLoading = true
 		return a, tea.Batch(a.spinner.Tick, runMCInfo(host.IP, a.username, a.password))
+
+	case "power-on-sol":
+		a.activeDialog = nil
+		if len(a.results) == 0 {
+			return a, nil
+		}
+		host := a.results[a.selectedHost].IP
+		a.ipmiLoading = true
+		a.solAfterPower = true
+		a.status = "Powering on " + host + "..."
+		a.logf("Power on + SOL — %s", host)
+		return a, tea.Batch(a.spinner.Tick, runPowerAction(host, a.username, a.password, "on"))
 
 	case "on", "off", "soft", "reset":
 		a.activeDialog = nil
@@ -1384,6 +1411,12 @@ func (a *App) updateMCInfo(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		host := a.results[a.selectedHost].IP
+		// If the chassis is powered off, offer to power it on first so the
+		// user can watch the full boot sequence over SOL.
+		if a.chassis != nil && !a.chassis.PowerOn {
+			a.activeDialog = NewPowerOnSOLDialog(host)
+			return a, nil
+		}
 		a.ipmiLoading = true
 		a.loadProgress = Progress{} // clear any stale scan bar
 		a.status = "Starting SOL session with " + host

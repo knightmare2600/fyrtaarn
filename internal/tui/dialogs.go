@@ -432,6 +432,25 @@ func renderButton(label string, focused, disabled bool) string {
 		Render("[ " + label + " ]")
 }
 
+// NewPowerOnSOLDialog is shown when the user presses O (SOL) and the chassis
+// is currently powered off. It offers to power on and immediately open SOL so
+// the user can watch the full boot sequence from BIOS onwards.
+func NewPowerOnSOLDialog(host string) *Dialog {
+	return &Dialog{
+		Title: "Chassis is Powered Off",
+		Body: fmt.Sprintf(
+			"The chassis on %s is currently off.\n\n"+
+				"Power it on and open the SOL console now?\n"+
+				"The console connects immediately so you can\n"+
+				"watch the full boot sequence from BIOS.", host),
+		buttons: []DialogButton{
+			{Label: "Power On + Open SOL", Action: "power-on-sol"},
+			{Label: "Cancel", Action: "cancel"},
+		},
+		focus: 0,
+	}
+}
+
 // NewConnectBMCDialog prompts for a BMC IP and credentials to connect directly,
 // bypassing the discovery scan.
 func NewConnectBMCDialog(defaultUsername string) *Dialog {
