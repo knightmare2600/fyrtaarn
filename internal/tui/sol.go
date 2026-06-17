@@ -188,7 +188,13 @@ func (s *solPane) flushCR() {
 func (s *solPane) processNormal(b byte) {
 	switch {
 	case b == 0x1b:
-		s.flushCR()
+		// ESC means a control sequence is coming — only do the CR part (col reset),
+		// not an implicit LF. Emitting a spurious line-feed here would scroll the
+		// screen before the cursor-position command runs, corrupting BIOS/UEFI draws.
+		if s.pendingCR {
+			s.pendingCR = false
+			s.curCol = 0
+		}
 		s.state = stateEscape
 
 	case b == '\r':
@@ -597,7 +603,7 @@ func keyToBytes(msg tea.KeyMsg) []byte {
 	case "enter":
 		return []byte{'\r'}
 	case "backspace":
-		return []byte{'\x7f'}
+		return []byte{'\x08'} // BS (ctrl+H) — GRUB and serial firmware expect \x08, not DEL (\x7f)
 	case "tab":
 		return []byte{'\t'}
 	case "up":
