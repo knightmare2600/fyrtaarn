@@ -44,10 +44,11 @@ The name reflects the project's purpose: visibility, remote control, and infrast
 - Bubble Tea TUI with alt-screen mode
 - Multi-theme engine with 20 themes (F2 to cycle; Theme submenu for direct selection)
 - Keyboard navigation and mouse support (cell-motion)
-- Menu bar (F9) — File > New Scan / Theme submenu / Exit; Help > About
+- Menu bar (F9) — File > **Connect to BMC** / New Scan / Export / **Start Log** / **Stop Log** / Theme submenu / Exit; Help > About
 - Compact MC-style dropdown menus with submenu navigation
 - MC-style modal windows — all dialogs and popups rendered as centered bordered windows with the title embedded in the top border line (`╭── Title ──╮`) and a drop shadow; consistent chrome across scan dialog, login, export, power control, user management, virtual media, about, and loading screens
-- Menu bar keyboard accelerators — F9 activates the bar; bare letter keys navigate without Alt: **F**ile / **H**elp at top level; **N**ew Scan / **E**xport / **T**heme / e**X**it / **A**bout in dropdowns; accelerator character rendered underlined
+- Menu bar keyboard accelerators — F9 activates the bar; bare letter keys navigate without Alt: **F**ile / **H**elp at top level; **C**onnect to BMC / **N**ew Scan / **E**xport / **L**og start / **S**top log / **T**heme / e**X**it / **A**bout in dropdowns; accelerator character rendered underlined
+- F2 and F9 pass through to the BMC when the SOL console is active rather than triggering TUI chrome
 - Async spinner during all network operations
 - Status bar shows context-sensitive keyboard hints per screen with live pagination for scrollable views; shows "No scan performed" before the first scan runs
 - Chrome/content colour split: menu bar and status bar use their own foreground/background pair (`Chrome`/`ChromeFg`) independent of the content area, allowing light-chrome themes (Pan Am, Network SouthEast) to render correctly
@@ -89,8 +90,10 @@ The name reflects the project's purpose: visibility, remote control, and infrast
   - Cyan — informational (default)
 - **FRU / hardware inventory** — scrollable `ipmitool fru` output with device section headers
 - **Power control** — on, off, soft shutdown, reset; dialog shows current chassis power state
-- **SOL console** — Serial over LAN runs inside a TUI pane (`[O]` from BMC Info); ipmitool executes in a pty so the menu bar and status bar stay visible; ANSI stripped, 1000-line scrollback buffer, `[F10]` disconnect, `[PgUp/PgDn]` scroll; Ctrl+C forwarded to the BMC rather than quitting the app
+- **SOL console** — Serial over LAN runs inside a TUI pane (`[O]` from BMC Info); ipmitool executes in a pty so the menu bar and status bar stay visible; full VT100/VT220 screen emulator (cols×rows character grid) — cursor positioning, clear-screen, scroll regions, insert/delete lines, erase-in-line/display, and all standard CSI sequences are honoured so GRUB menus, AMI/Award BIOS splashes, and interactive programs render correctly; bare `\r` (firmware line endings) and `\r\n` both handled; backspace sends `\x08` (BS) for compatibility with GRUB's readline and serial firmware; 1000-line scrollback history; `[F10]` disconnect; `[PgUp/PgDn]` scroll; all keys including F1–F12 forwarded to the BMC; Ctrl+C forwarded rather than quitting the app; if the chassis is powered off `[O]` prompts to power it on first and connects SOL immediately so the full boot sequence is captured from BIOS POST
 - **Virtual media** — Redfish ISO mount and eject via `InsertMedia`/`EjectMedia` actions; walks `Managers → VirtualMedia` to find the CD/DVD slot (`[V]` from BMC Info; requires Redfish-capable host)
+- **Direct connect** — File > Connect to BMC opens a dialog (IP, username, password) and connects without running a scan; host is added to the results tree so all subsequent operations work normally
+- **Session log** — File > Start Log… prompts for a file path and begins logging all activity; SOL output is written as rendered plain text (lines are flushed to the log as they scroll off the top of the VT100 screen buffer, final screen state captured on disconnect); scan results, BMC connections, and SOL start/end events are logged with timestamps; File > Stop Log closes the file
 
 ### Architecture
 
@@ -322,31 +325,35 @@ sudo ./dist/fyrtaarn
 
 ## Key Bindings
 
-| Key         | Context        | Action                         |
-|-------------|----------------|--------------------------------|
-| F9          | Global         | Open / close menu bar          |
-| F2          | Global         | Cycle to next theme            |
-| Ctrl+C      | Global         | Quit                           |
-| ↑ / k       | Results, lists | Move selection up              |
-| ↓ / j       | Results, lists | Move selection down            |
-| Tab         | Results        | Expand / collapse host detail  |
-| Enter       | Results        | Connect (or reconnect)         |
-| S           | BMC Info       | Load sensor list (SDR)         |
-| L           | BMC Info       | Load event log (SEL)           |
-| F           | BMC Info       | Load FRU / hardware inventory  |
-| U           | BMC Info       | Load user account list         |
-| C           | BMC Info       | Run firmware compliance check  |
-| R           | BMC Info       | Redfish full enumeration       |
-| P           | BMC Info       | Power control dialog           |
-| O           | BMC Info       | Open SOL console (in-pane)     |
-| F10         | SOL Console    | Disconnect and return          |
-| PgUp        | SOL Console    | Scroll up through buffer       |
-| PgDn        | SOL Console    | Scroll down / snap to bottom   |
-| V           | BMC Info       | Virtual media dialog (Redfish) |
-| Enter       | User list      | Open action dialog for user    |
-| N           | User list      | Create new user                |
-| F9 > Export | Results        | Export inventory to CSV / JSON |
-| Esc / Q     | Most screens   | Back / quit                    |
+| Key                    | Context           | Action                                        |
+|------------------------|-------------------|-----------------------------------------------|
+| F9                     | Global (non-SOL)  | Open / close menu bar                         |
+| F2                     | Global (non-SOL)  | Cycle to next theme                           |
+| Ctrl+C                 | Global (non-SOL)  | Quit                                          |
+| ↑ / k                  | Results, lists    | Move selection up                             |
+| ↓ / j                  | Results, lists    | Move selection down                           |
+| Tab                    | Results           | Expand / collapse host detail                 |
+| Enter                  | Results           | Connect (or reconnect)                        |
+| S                      | BMC Info          | Load sensor list (SDR)                        |
+| L                      | BMC Info          | Load event log (SEL)                          |
+| F                      | BMC Info          | Load FRU / hardware inventory                 |
+| U                      | BMC Info          | Load user account list                        |
+| C                      | BMC Info          | Run firmware compliance check                 |
+| R                      | BMC Info          | Redfish full enumeration                      |
+| P                      | BMC Info          | Power control dialog                          |
+| O                      | BMC Info          | Open SOL console; prompts to power on if off  |
+| F10                    | SOL Console       | Disconnect and return                         |
+| PgUp                   | SOL Console       | Scroll up through history                     |
+| PgDn                   | SOL Console       | Scroll down / snap to live bottom             |
+| All other keys / F1–F12| SOL Console       | Forwarded to BMC (incl. F2, F9)               |
+| V                      | BMC Info          | Virtual media dialog (Redfish)                |
+| Enter                  | User list         | Open action dialog for user                   |
+| N                      | User list         | Create new user                               |
+| F9 > Connect to BMC    | Global            | Connect directly without scanning             |
+| F9 > Export            | Results           | Export inventory to CSV / JSON                |
+| F9 > Start Log         | Global            | Begin session log to file                     |
+| F9 > Stop Log          | Global            | End session log                               |
+| Esc / Q                | Most screens      | Back / quit                                   |
 
 ---
 
@@ -437,6 +444,19 @@ For detailed technical writeups and excellent explanations of:
 ---
 
 ## Changelog
+
+### 0.6.0
+
+- **VT100 screen emulator** — SOL console replaced its ANSI-stripping line buffer with a full VT100/VT220 screen grid; cursor positioning (`\x1b[r;cH`), clear-screen (`\x1b[2J`), scroll regions (`\x1b[r`), insert/delete lines (`CSI L/M`), erase-in-line/display (`CSI K/J`), reverse index (`ESC M`), save/restore cursor, and all standard CSI sequences are now processed correctly; GRUB menus, AMI/Award BIOS splashes, and interactive serial programs render with proper layout instead of garbled text
+- **SOL CR/LF handling** — bare `\r` (used by Award BIOS and some firmware as a line ending without `\n`) is now converted to `\r\n` via a `pendingCR` flag; `\r\n` pairs and bare `\n` are unaffected; `\r` followed by an ESC sequence only resets the column (no implicit line-feed) so BIOS cursor-position sequences don't trigger spurious scrolls
+- **Backspace fix** — SOL backspace now sends `\x08` (BS / ctrl+H) instead of `\x7f`; GRUB's readline editor and serial firmware universally expect `\x08` — `\x7f` was being rendered as a literal dot character
+- **SOL window sizing** — pty is now told the correct visible dimensions (width−2 × height−6) rather than the full content height; GRUB and other applications that query terminal size now receive accurate row/column counts and draw their output correctly
+- **SOL reconnect race fix** — `solDoneMsg` carries a session generation counter; stale done-messages from a closed pty no longer kill a newly reconnected session; stale scan progress bar no longer appears in the SOL loading modal on reconnect
+- **SOL F2 / F9 pass-through** — function keys F2 (theme cycle) and F9 (menu bar) are now forwarded to the BMC when the SOL console is active rather than being intercepted by the TUI; all F1–F12 keys reach the remote console
+- **Power on + SOL** — pressing `[O]` when the chassis is powered off shows a dialog offering to power the chassis on and open SOL immediately; the console connects right after the power command is issued so the full boot sequence is visible from BIOS POST
+- **Direct connect** — File > Connect to BMC opens a three-field dialog (IP address, username, password) and connects without requiring a discovery scan; the host is added to the results tree so sensors, SEL, FRU, users, power control, and all other operations work normally from that point
+- **Session log** — File > Start Log… prompts for a file path and begins logging; SOL output is written as rendered plain text in chronological order (lines are appended as they scroll off the VT100 grid, final screen state flushed on disconnect); scan results, BMC connections, SOL start/end, and direct-connect events are logged with timestamps; File > Stop Log closes the file; log is flushed cleanly on F10, session end, and application exit
+- **Empty SOL pane hint** — when SOL is connected but the remote system is idle (already booted, getty waiting for input), a message prompts the user to press Enter to wake the remote terminal
 
 ### 0.5.3
 
