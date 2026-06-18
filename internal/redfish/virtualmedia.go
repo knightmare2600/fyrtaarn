@@ -149,14 +149,18 @@ func findVMAction(c *http.Client, base, user, pass, actionName string) (string, 
 				continue
 			}
 
-			// Only consider CD/DVD entries (skip floppy, USB, etc.).
-			lower := strings.ToLower(vmPath)
-			if !strings.Contains(lower, "cd") && !strings.Contains(lower, "dvd") {
+			vmRes, err := fetchJSON(c, base+vmPath, user, pass)
+			if err != nil {
 				continue
 			}
 
-			vmRes, err := fetchJSON(c, base+vmPath, user, pass)
-			if err != nil {
+			// Accept CD/DVD slots identified by either the path (descriptive
+			// vendors like iDRAC) or the MediaTypes array (numeric-path vendors
+			// like HP iLO where path sniffing would miss the slot entirely).
+			lower := strings.ToLower(vmPath)
+			pathMatch := strings.Contains(lower, "cd") || strings.Contains(lower, "dvd")
+			typeMatch := vmHasMediaType(vmRes, "CD") || vmHasMediaType(vmRes, "DVD")
+			if !pathMatch && !typeMatch {
 				continue
 			}
 
@@ -183,6 +187,7 @@ func doPost(c *http.Client, url, user, pass string, body []byte) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("OData-Version", "4.0")
 	if user != "" {
 		req.SetBasicAuth(user, pass)
 	}
@@ -205,6 +210,10 @@ func fetchJSON(c *http.Client, url, user, pass string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// OData-Version and Accept are required by strict Redfish implementations
+	// (iLO 5/6 in particular) and harmless on permissive ones.
+	req.Header.Set("OData-Version", "4.0")
+	req.Header.Set("Accept", "application/json")
 	if user != "" {
 		req.SetBasicAuth(user, pass)
 	}
@@ -225,6 +234,19 @@ func fetchJSON(c *http.Client, url, user, pass string) (map[string]any, error) {
 	}
 
 	return out, nil
+}
+
+// vmHasMediaType reports whether a VirtualMedia resource's MediaTypes array
+// contains the given type (case-insensitive). Used to identify CD/DVD slots
+// on vendors like HP iLO that use numeric paths rather than descriptive ones.
+func vmHasMediaType(obj map[string]any, mediaType string) bool {
+	raw, _ := obj["MediaTypes"].([]any)
+	for _, v := range raw {
+		if s, ok := v.(string); ok && strings.EqualFold(s, mediaType) {
+			return true
+		}
+	}
+	return false
 }
 
 func jsonArray(obj map[string]any, key string) ([]map[string]any, bool) {

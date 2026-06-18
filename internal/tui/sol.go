@@ -57,12 +57,6 @@ type solPane struct {
 	curRow int
 	curCol int
 
-	// pendingCR: a bare \r was received but not yet committed.
-	// If \n follows it is \r\n (CRLF); if anything else follows we emit an
-	// implicit \n first. This makes Award BIOS and firmware that send \r only
-	// render correctly without breaking normal \r\n / \n-only output.
-	pendingCR bool
-
 	// Scroll region (0-indexed, inclusive). Defaults to full screen.
 	scrollTop    int
 	scrollBottom int
@@ -149,7 +143,6 @@ func (s *solPane) ingest(raw []byte) {
 		if s.state == stateNormal && b >= 0x80 {
 			r, size := utf8.DecodeRune(raw)
 			if r != utf8.RuneError && size > 1 {
-				s.flushCR()
 				s.putChar(r)
 				raw = raw[size:]
 				continue
@@ -175,61 +168,37 @@ func (s *solPane) processByte(b byte) {
 	}
 }
 
-// flushCR commits a pending bare \r as an implicit \r\n.
-// Called before any byte that is not \n and not another \r.
-func (s *solPane) flushCR() {
-	if s.pendingCR {
-		s.pendingCR = false
-		s.curCol = 0
-		s.doLineFeed()
-	}
-}
-
 func (s *solPane) processNormal(b byte) {
 	switch {
 	case b == 0x1b:
-		// ESC means a control sequence is coming — only do the CR part (col reset),
-		// not an implicit LF. Emitting a spurious line-feed here would scroll the
-		// screen before the cursor-position command runs, corrupting BIOS/UEFI draws.
-		if s.pendingCR {
-			s.pendingCR = false
-			s.curCol = 0
-		}
 		s.state = stateEscape
 
 	case b == '\r':
-		// Don't commit yet — wait to see if \n follows.
-		// If another \r comes first, the previous one is CR-only → flush as CRLF.
-		s.flushCR()
-		s.pendingCR = true
+		// Pure carriage return: move to column 0, stay on the same row.
+		// BIOS and firmware use bare \r to overwrite a progress line in-place;
+		// treating it as CR+LF would generate a new line for every update and
+		// scroll the splash screen into history. This matches xterm / real VT100.
+		s.curCol = 0
 
 	case b == '\n', b == 0x0b, b == 0x0c: // LF / VT / FF
-		if s.pendingCR {
-			// \r\n pair: the \r moves to col 0, the \n advances the row.
-			s.pendingCR = false
-			s.curCol = 0
-		}
 		s.doLineFeed()
 
 	case b == '\b':
-		s.flushCR()
 		if s.curCol > 0 {
 			s.curCol--
 		}
 
 	case b == '\t':
-		s.flushCR()
 		next := ((s.curCol / 8) + 1) * 8
 		if next >= s.cols {
 			next = s.cols - 1
 		}
 		s.curCol = next
 
-	case b == 0x07: // BEL — ignore (don't flush: BEL can precede \n in BIOS)
+	case b == 0x07: // BEL — ignore
 	case b == 0x0e, b == 0x0f: // SO / SI — charset shift, ignore
 
 	case b >= 0x20:
-		s.flushCR()
 		s.putChar(rune(b))
 	}
 }
@@ -498,7 +467,6 @@ func (s *solPane) fullReset() {
 	s.curRow, s.curCol = 0, 0
 	s.scrollTop, s.scrollBottom = 0, s.rows-1
 	s.savedRow, s.savedCol = 0, 0
-	s.pendingCR = false
 }
 
 /* ---------------- RENDERING / LOG HELPERS ---------------- */
