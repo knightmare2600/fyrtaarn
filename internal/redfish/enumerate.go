@@ -7,16 +7,18 @@ import (
 
 // SystemInfo holds the full hardware picture retrieved from /redfish/v1/Systems/<id>.
 type SystemInfo struct {
-	Manufacturer    string
-	Model           string
-	SerialNumber    string
-	SKU             string
-	HostName        string
-	BIOSVersion     string
-	PowerState      string
-	ProcessorCount  int
-	MemoryGiB       float64
-	MemorySummary   string
+	Manufacturer   string
+	Model          string
+	SerialNumber   string
+	SKU            string
+	HostName       string
+	BIOSVersion    string
+	PowerState     string
+	Health         string // Status.Health
+	ProcessorCount int
+	ProcessorModel string // ProcessorSummary.Model
+	MemoryGiB      float64
+	MemoryHealth   string // MemorySummary.Status.HealthRollup
 }
 
 // ManagerInfo holds BMC/manager details from /redfish/v1/Managers/<id>.
@@ -92,19 +94,31 @@ func parseSystem(obj map[string]any) SystemInfo {
 		PowerState:   str(obj, "PowerState"),
 	}
 
-	// ProcessorSummary.Count
+	// Status.Health
+	if st, ok := obj["Status"].(map[string]any); ok {
+		s.Health = str(st, "Health")
+	}
+
+	// ProcessorSummary.Count + Model
 	if ps, ok := obj["ProcessorSummary"].(map[string]any); ok {
 		if c, ok := ps["Count"].(float64); ok {
 			s.ProcessorCount = int(c)
 		}
+		s.ProcessorModel = str(ps, "Model")
 	}
 
-	// MemorySummary.TotalSystemMemoryGiB
+	// MemorySummary.TotalSystemMemoryGiB + Status.HealthRollup
 	if ms, ok := obj["MemorySummary"].(map[string]any); ok {
 		if g, ok := ms["TotalSystemMemoryGiB"].(float64); ok {
 			s.MemoryGiB = g
 		}
-		s.MemorySummary = str(ms, "Status")
+		// Status is a nested object {"HealthRollup": "OK"} — must drill in.
+		if st, ok := ms["Status"].(map[string]any); ok {
+			s.MemoryHealth = str(st, "HealthRollup")
+			if s.MemoryHealth == "" {
+				s.MemoryHealth = str(st, "Health")
+			}
+		}
 	}
 
 	return s
@@ -117,9 +131,21 @@ func parseManager(obj map[string]any) ManagerInfo {
 		UUID:            str(obj, "UUID"),
 	}
 
-	// Status.Health
+	// Status: try Health first (standard Redfish), fall back to State.
+	// iLO returns {"State": "Enabled"} with no Health key at root level.
 	if st, ok := obj["Status"].(map[string]any); ok {
 		m.Status = str(st, "Health")
+		if m.Status == "" {
+			m.Status = str(st, "State")
+		}
+	}
+
+	// If Name is the generic placeholder, extract a better name from
+	// FirmwareVersion. e.g. "iLO 5 v1.40" → "iLO 5".
+	if m.Name == "Manager" || m.Name == "BMC" || m.Name == "" {
+		if idx := strings.Index(m.FirmwareVersion, " v"); idx > 0 {
+			m.Name = m.FirmwareVersion[:idx]
+		}
 	}
 
 	return m

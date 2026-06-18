@@ -447,11 +447,22 @@ func (a *App) renderRedfishEnum() string {
 		lines = append(lines, renderRedfishField("Hostname", sys.HostName))
 		lines = append(lines, renderRedfishField("BIOS Version", sys.BIOSVersion))
 		lines = append(lines, renderRedfishField("Power State", sys.PowerState))
+		if sys.Health != "" {
+			lines = append(lines, renderRedfishField("Health", sys.Health))
+		}
 		if sys.ProcessorCount > 0 {
-			lines = append(lines, renderRedfishField("CPUs", fmt.Sprintf("%d", sys.ProcessorCount)))
+			cpuStr := fmt.Sprintf("%d", sys.ProcessorCount)
+			if sys.ProcessorModel != "" {
+				cpuStr += " × " + sys.ProcessorModel
+			}
+			lines = append(lines, renderRedfishField("CPUs", cpuStr))
 		}
 		if sys.MemoryGiB > 0 {
-			lines = append(lines, renderRedfishField("Memory", fmt.Sprintf("%.0f GiB", sys.MemoryGiB)))
+			memStr := fmt.Sprintf("%.0f GiB", sys.MemoryGiB)
+			if sys.MemoryHealth != "" {
+				memStr += " (" + sys.MemoryHealth + ")"
+			}
+			lines = append(lines, renderRedfishField("Memory", memStr))
 		}
 		lines = append(lines, "")
 	}

@@ -1631,7 +1631,9 @@ func (a *App) updateRedfishEnum(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	totalLines := 0
 	if a.redfishEnum != nil {
-		totalLines = len(a.redfishEnum.Systems)*9 + len(a.redfishEnum.Managers)*5
+		// 12 lines per system (added Health, processor model, memory health);
+		// 5 lines per manager.
+		totalLines = len(a.redfishEnum.Systems)*12 + len(a.redfishEnum.Managers)*5
 	}
 
 	maxOffset := totalLines - visibleLines
