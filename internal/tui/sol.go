@@ -40,6 +40,7 @@ const (
 	stateCharset = 2 // after ESC ( / ) — consume one more byte then return
 	stateCSI     = 3
 	stateOSC     = 4
+	stateSSThree = 5 // after ESC O — SS3: app cursor keys (A-D) and F1-F4 (P-S)
 )
 
 /* ---------------- PANE ---------------- */
@@ -165,6 +166,8 @@ func (s *solPane) processByte(b byte) {
 		s.processCSI(b)
 	case stateOSC:
 		s.processOSC(b)
+	case stateSSThree:
+		s.processSSThree(b)
 	}
 }
 
@@ -183,9 +186,16 @@ func (s *solPane) processNormal(b byte) {
 	case b == '\n', b == 0x0b, b == 0x0c: // LF / VT / FF
 		s.doLineFeed()
 
-	case b == '\b':
+	case b == '\b': // BS — destructive: erase the character to the left
 		if s.curCol > 0 {
 			s.curCol--
+			s.grid[s.curRow][s.curCol] = ' '
+		}
+
+	case b == 0x7f: // DEL — also destructive backspace (echoed by BIOS/serial on erase)
+		if s.curCol > 0 {
+			s.curCol--
+			s.grid[s.curRow][s.curCol] = ' '
 		}
 
 	case b == '\t':
@@ -213,6 +223,8 @@ func (s *solPane) processEscape(b byte) {
 		s.csiInter = 0
 	case ']':
 		s.state = stateOSC
+	case 'O': // SS3 — application cursor/function keys
+		s.state = stateSSThree
 	case '(', ')', '*', '+':
 		s.state = stateCharset
 	case '7':
@@ -260,6 +272,23 @@ func (s *solPane) processOSC(b byte) {
 		s.state = stateNormal
 	} else if b == 0x1b {
 		s.state = stateEscape
+	}
+}
+
+// processSSThree handles the byte following ESC O (SS3). In application cursor
+// mode A-D move the cursor one step; P-S are F1-F4 and are silently consumed.
+func (s *solPane) processSSThree(b byte) {
+	s.state = stateNormal
+	switch b {
+	case 'A':
+		s.curRow = max(s.curRow-1, s.scrollTop)
+	case 'B':
+		s.curRow = min(s.curRow+1, s.scrollBottom)
+	case 'C':
+		s.curCol = min(s.curCol+1, s.cols-1)
+	case 'D':
+		s.curCol = max(s.curCol-1, 0)
+	// P, Q, R, S = F1-F4 in application mode — no action needed
 	}
 }
 
@@ -570,8 +599,8 @@ func keyToBytes(msg tea.KeyMsg) []byte {
 	switch msg.String() {
 	case "enter":
 		return []byte{'\r'}
-	case "backspace":
-		return []byte{'\x08'} // BS (ctrl+H) — GRUB and serial firmware expect \x08, not DEL (\x7f)
+	case "backspace", "ctrl+backspace":
+		return []byte{'\x7f'} // DEL — standard VT100/serial-console erase character (stty erase ^?)
 	case "tab":
 		return []byte{'\t'}
 	case "up":
