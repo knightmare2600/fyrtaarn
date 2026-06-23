@@ -1684,13 +1684,33 @@ func (a *App) updateSOL(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
+	// Backspace: send ESC[D (cursor-left) + \x04 (Ctrl+D, delete-at-cursor).
+	// GRUB's serial driver maps ESC[D → GRUB_TERM_KEY_LEFT and \x04 →
+	// GRUB_TERM_CTRL|'d' (forward-delete), giving reliable backward-delete
+	// without relying on \x08 (ignored by some GRUB builds) or \x7f (echoed
+	// as '.' by GRUB builds that treat it as a printable char).
+	// editBuf tracks what has been typed so we only send when there is
+	// actually a char to the left of the cursor.
+	switch msg.String() {
+	case "backspace", "ctrl+backspace", "ctrl+h":
+		if len(a.solPane.editBuf) > 0 {
+			a.solPane.editBuf = a.solPane.editBuf[:len(a.solPane.editBuf)-1]
+			a.solPane.write([]byte{'\x1b', '[', 'D', '\x04'})
+			a.solPane.scrollUp = 0
+		}
+		return a, nil
+	}
+
 	// Forward everything else to the pty.
 	if b := keyToBytes(msg); len(b) > 0 {
-		// Apply backspace locally for immediate display feedback.
-		// absorbBS absorbs GRUB's \x7f echo (or bash's leading \b) so the
-		// remote echo does not double-delete.
-		if len(b) == 1 && (b[0] == '\x7f' || b[0] == '\x08') {
-			a.solPane.localBackspace()
+		// Track printable chars and line-kill sequences in editBuf.
+		if len(b) == 1 {
+			switch {
+			case b[0] >= 0x20 && b[0] < 0x7f:
+				a.solPane.editBuf = append(a.solPane.editBuf, rune(b[0]))
+			case b[0] == '\r', b[0] == '\x03', b[0] == '\x15':
+				a.solPane.editBuf = a.solPane.editBuf[:0]
+			}
 		}
 		a.solPane.write(b)
 		// New input: snap back to bottom so the user sees the response.

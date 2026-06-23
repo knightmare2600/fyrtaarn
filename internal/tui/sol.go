@@ -78,12 +78,11 @@ type solPane struct {
 	// scrollUp is the user's scroll-back offset (0 = live bottom of output).
 	scrollUp int
 
-	// absorbBS is a counter of locally-echoed backspaces whose remote echo
-	// we must swallow to avoid double-deletion. GRUB's readline processes
-	// \x08 silently (no visual erase echoed back), so we apply the erase
-	// locally. If a later echo does arrive (bash readline sends \b SPC \b),
-	// this counter absorbs just the leading \b/\x7f to keep the grid correct.
-	absorbBS int
+	// editBuf shadows what the user has typed into the current readline command.
+	// It lets updateSOL know there is something to the left of the cursor to
+	// delete, so we can send ESC[D (cursor-left) + \x04 (Ctrl+D, delete-forward)
+	// instead of a backspace byte that GRUB may ignore or misinterpret.
+	editBuf []rune
 }
 
 func newSolPane(ptmx *os.File, cols, rows int) *solPane {
@@ -141,17 +140,6 @@ func (s *solPane) write(b []byte) {
 	_, _ = s.ptmx.Write(b)
 }
 
-// localBackspace erases the character to the left of the cursor immediately,
-// providing instant visual feedback without waiting for the remote echo.
-// absorbBS is incremented so that GRUB's \x7f echo (or the leading \b of
-// bash's \b SPC \b response) is absorbed rather than double-deleting.
-func (s *solPane) localBackspace() {
-	if s.curCol > 0 {
-		s.curCol--
-		s.grid[s.curRow][s.curCol] = ' '
-		s.absorbBS++
-	}
-}
 
 /* ---------------- VT100 PARSER ---------------- */
 
@@ -206,20 +194,13 @@ func (s *solPane) processNormal(b byte) {
 		s.doLineFeed()
 
 	case b == '\b': // BS — destructive: erase the character to the left
-		if s.absorbBS > 0 {
-			// Absorb the leading \b of a remote erase echo (\b SPC \b) that
-			// arrived after we already applied a local backspace. The trailing
-			// SPC and \b are processed normally and leave the grid correct.
-			s.absorbBS--
-		} else if s.curCol > 0 {
+		if s.curCol > 0 {
 			s.curCol--
 			s.grid[s.curRow][s.curCol] = ' '
 		}
 
 	case b == 0x7f: // DEL — also destructive backspace (echoed by BIOS/serial on erase)
-		if s.absorbBS > 0 {
-			s.absorbBS--
-		} else if s.curCol > 0 {
+		if s.curCol > 0 {
 			s.curCol--
 			s.grid[s.curRow][s.curCol] = ' '
 		}
@@ -625,8 +606,8 @@ func keyToBytes(msg tea.KeyMsg) []byte {
 	switch msg.String() {
 	case "enter":
 		return []byte{'\r'}
-	case "backspace", "ctrl+backspace":
-		return []byte{'\x7f'} // DEL — GRUB readline erase char; \x08 is silently ignored
+	case "backspace", "ctrl+backspace", "ctrl+h":
+		return nil // handled in updateSOL: ESC[D + Ctrl+D (cursor-left + delete-forward)
 	case "tab":
 		return []byte{'\t'}
 	case "up":
@@ -651,8 +632,6 @@ func keyToBytes(msg tea.KeyMsg) []byte {
 		return []byte{'\x06'}
 	case "ctrl+g":
 		return []byte{'\x07'}
-	case "ctrl+h":
-		return []byte{'\x08'}
 	case "ctrl+k":
 		return []byte{'\x0b'}
 	case "ctrl+l":
