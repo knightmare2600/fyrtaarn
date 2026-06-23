@@ -33,6 +33,12 @@ jobs:
             goarch: mips64le
             gomips64: softfloat
             binary: fyrtaarn-linux-mips64el
+          - goos: darwin
+            goarch: amd64
+            binary: fyrtaarn-darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            binary: fyrtaarn-darwin-arm64
           - goos: windows
             goarch: amd64
             binary: fyrtaarn-windows-amd64.exe
