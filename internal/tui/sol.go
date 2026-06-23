@@ -600,7 +600,7 @@ func keyToBytes(msg tea.KeyMsg) []byte {
 	case "enter":
 		return []byte{'\r'}
 	case "backspace", "ctrl+backspace":
-		return []byte{'\x7f'} // DEL — standard VT100/serial-console erase character (stty erase ^?)
+		return []byte{'\x08'} // BS — GRUB and serial firmware use Ctrl+H for erase
 	case "tab":
 		return []byte{'\t'}
 	case "up":

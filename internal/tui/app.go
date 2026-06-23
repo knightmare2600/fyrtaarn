@@ -461,9 +461,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.width = msg.Width
 		a.height = msg.Height
 		if a.solPane != nil {
-			// Tell the pty about the actual visible content rows:
-			// height - 2 (menu+status bars) - 4 (SOL header/divider/padding).
-			a.solPane.resize(msg.Width-2, msg.Height-6)
+			// SOL is always capped at 80 cols — BIOS/GRUB format for that width
+			// and IPMI SOL has no mechanism to tell the remote about wider terminals.
+			a.solPane.resize(min(msg.Width-2, solDefaultCols), msg.Height-6)
 		}
 		return a, nil
 
@@ -709,7 +709,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.ipmiLoading = true
 			a.loadProgress = Progress{}
 			a.status = "Power on sent — opening SOL console on " + host + "..."
-			cols := max(a.width-2, 80)
+			cols := solDefaultCols
 			rows := max(a.contentH-4, 24)
 			return a, tea.Batch(a.spinner.Tick, startSOLPane(host, a.username, a.password, cols, rows))
 		}
@@ -1420,14 +1420,8 @@ func (a *App) updateMCInfo(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.ipmiLoading = true
 		a.loadProgress = Progress{} // clear any stale scan bar
 		a.status = "Starting SOL session with " + host
-		cols := a.width - 2 // match the maxWidth clip in renderSOL
-		rows := a.contentH - 4
-		if cols < 80 {
-			cols = 80
-		}
-		if rows < 24 {
-			rows = 24
-		}
+		cols := solDefaultCols // always 80 — BIOS/GRUB expect 80-col serial terminal
+		rows := max(a.contentH-4, 24)
 		return a, tea.Batch(a.spinner.Tick, startSOLPane(host, a.username, a.password, cols, rows))
 
 	case "v":
