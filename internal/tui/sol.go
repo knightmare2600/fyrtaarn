@@ -77,6 +77,13 @@ type solPane struct {
 
 	// scrollUp is the user's scroll-back offset (0 = live bottom of output).
 	scrollUp int
+
+	// absorbBS is a counter of locally-echoed backspaces whose remote echo
+	// we must swallow to avoid double-deletion. GRUB's readline processes
+	// \x08 silently (no visual erase echoed back), so we apply the erase
+	// locally. If a later echo does arrive (bash readline sends \b SPC \b),
+	// this counter absorbs just the leading \b/\x7f to keep the grid correct.
+	absorbBS int
 }
 
 func newSolPane(ptmx *os.File, cols, rows int) *solPane {
@@ -134,6 +141,19 @@ func (s *solPane) write(b []byte) {
 	_, _ = s.ptmx.Write(b)
 }
 
+// localBackspace erases the character to the left of the cursor immediately,
+// without waiting for the remote echo. GRUB's readline does not echo a visual
+// erase sequence over IPMI SOL, so we must apply the change ourselves.
+// absorbBS is incremented so that the first \b or \x7f the remote later sends
+// (bash readline echo: \b SPC \b) is absorbed rather than double-deleting.
+func (s *solPane) localBackspace() {
+	if s.curCol > 0 {
+		s.curCol--
+		s.grid[s.curRow][s.curCol] = ' '
+		s.absorbBS++
+	}
+}
+
 /* ---------------- VT100 PARSER ---------------- */
 
 // ingest feeds raw pty output through the VT100 state machine.
@@ -187,13 +207,20 @@ func (s *solPane) processNormal(b byte) {
 		s.doLineFeed()
 
 	case b == '\b': // BS — destructive: erase the character to the left
-		if s.curCol > 0 {
+		if s.absorbBS > 0 {
+			// Absorb the leading \b of a remote erase echo (\b SPC \b) that
+			// arrived after we already applied a local backspace. The trailing
+			// SPC and \b are processed normally and leave the grid correct.
+			s.absorbBS--
+		} else if s.curCol > 0 {
 			s.curCol--
 			s.grid[s.curRow][s.curCol] = ' '
 		}
 
 	case b == 0x7f: // DEL — also destructive backspace (echoed by BIOS/serial on erase)
-		if s.curCol > 0 {
+		if s.absorbBS > 0 {
+			s.absorbBS--
+		} else if s.curCol > 0 {
 			s.curCol--
 			s.grid[s.curRow][s.curCol] = ' '
 		}
