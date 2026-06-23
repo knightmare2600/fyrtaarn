@@ -281,17 +281,20 @@ make cross
 
 ### Cross-compilation targets
 
-| Target | Make rule | Notes |
-|--------|-----------|-------|
-| Linux x86-64 | `make linux-amd64` | |
-| Linux ARM64 | `make linux-arm64` | Raspberry Pi 4+, Ampere, AWS Graviton |
-| Linux PowerPC64 BE | `make linux-ppc64` | G3/G4/G5 era PowerPC hardware |
-| Linux mipsel (32-bit LE) | `make linux-mipsel` | softfloat; embedded routers, no FPU required |
-| Linux mips64el (64-bit LE) | `make linux-mips64el` | softfloat |
-| Windows x64 | `make windows-amd64` | |
-| Windows ARM64 | `make windows-arm64` | Surface Pro X, Qualcomm Snapdragon laptops |
+| Target | Binary | Notes |
+|--------|--------|-------|
+| Linux x86-64 | `fyrtaarn-linux-amd64` | |
+| Linux ARM64 | `fyrtaarn-linux-arm64` | Raspberry Pi 4+, Ampere, AWS Graviton |
+| Linux ARMv7 | `fyrtaarn-linux-armv7` | Orange Pi, Raspberry Pi 2/3, most 32-bit ARM SBCs |
+| Linux PowerPC64 BE | `fyrtaarn-linux-ppc64` | G3/G4/G5 era PowerPC hardware |
+| Linux mipsel (32-bit LE) | `fyrtaarn-linux-mipsel` | softfloat; embedded routers, no FPU required |
+| Linux mips64el (64-bit LE) | `fyrtaarn-linux-mips64el` | softfloat |
+| macOS x86-64 | `fyrtaarn-darwin-amd64` | Intel Mac |
+| macOS ARM64 | `fyrtaarn-darwin-arm64` | Apple Silicon (M1 / M2 / M3 / M4) |
+| Windows x64 | `fyrtaarn-windows-amd64.exe` | |
+| Windows ARM64 | `fyrtaarn-windows-arm64.exe` | Surface Pro X, Qualcomm Snapdragon laptops |
 
-All targets set `CGO_ENABLED=0` for fully static binaries. Version, commit, and build date are injected via ldflags from the current git state.
+All targets set `CGO_ENABLED=0` for fully static binaries with no system library dependencies. Version, commit, and build date are injected via ldflags from the current git state.
 
 Pre-built binaries for all targets are attached to each [GitHub Release](../../releases).
 
@@ -299,16 +302,16 @@ Pre-built binaries for all targets are attached to each [GitHub Release](../../r
 
 Two paths to cut a release:
 
-**Button click (recommended)** — go to Actions → **Publish Release** → Run workflow; enter the version (e.g. `v0.5.3`) and optionally tick pre-release. GitHub builds all targets, creates the tag, generates `SHA256SUMS.txt`, and publishes the release automatically.
+**Button click (recommended)** — go to Actions → **Publish Release** → Run workflow; enter the version (e.g. `v0.6.1`) and optionally tick pre-release. GitHub builds all targets, creates the tag, generates `SHA256SUMS.txt`, and publishes the release automatically.
 
 **Command line** — push a version tag and `release.yml` fires:
 
 ```bash
-git tag v0.5.3
-git push origin v0.5.3
+git tag v0.6.1
+git push origin v0.6.1
 ```
 
-Both paths produce identical output: 8 binaries + `SHA256SUMS.txt` attached to the release, release notes auto-generated from commits since the previous tag.
+Both paths produce identical output: 10 binaries + `SHA256SUMS.txt` attached to the release, release notes auto-generated from commits since the previous tag.
 
 ---
 
@@ -444,6 +447,16 @@ For detailed technical writeups and excellent explanations of:
 ---
 
 ## Changelog
+
+### 0.6.1
+
+- **SOL SS3 sequence handling** — `ESC O` (SS3) was unhandled in the VT100 parser; the following letter fell through to `processNormal` and was rendered as a literal character, causing artefacts such as `A2` and `B2` on AMI BIOS POST screens. Added `stateSSThree` — `ESC O A/B/C/D` now execute single-step cursor movement and `ESC O P–S` (F1–F4 in application mode) are silently consumed
+- **SOL destructive backspace** — incoming `\x08` (BS) was non-destructive (cursor-left only); bare `\x08` from BIOS text fields left the deleted character visible on screen. Both `\x08` and `\x7f` in the incoming data stream now erase the cell to the left as well as moving the cursor, matching xterm behaviour
+- **SOL 80-column pane cap** — the VT100 pane was sized to the full window width; the AMI BIOS formats its copyright and version strings for an 80-column terminal and relies on the terminal to word-wrap them. On wider windows the text never wrapped and appeared on a single line. The pane is now capped at 80 columns regardless of window width — IPMI SOL has no mechanism to advertise terminal width to the remote
+- **CI: linux/armv7 target added** — `fyrtaarn-linux-armv7` (`GOARCH=arm GOARM=7`) added to both the build and publish workflows; covers Orange Pi, Raspberry Pi 2/3, and most 32-bit ARM SBCs
+- **CI: macOS targets added** — `fyrtaarn-darwin-amd64` and `fyrtaarn-darwin-arm64` added; cross-compiled from the Ubuntu runner with `CGO_ENABLED=0`
+- **CI: manual-trigger only** — build and lint workflows no longer fire on every push; both require an explicit "Run workflow" click in the Actions UI
+- **Code: gofmt** — applied `gofmt -w` across all 13 files that had formatting inconsistencies; fixes the lint workflow `gofmt -l` check
 
 ### 0.6.0
 
