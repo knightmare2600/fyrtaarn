@@ -17,10 +17,10 @@ type kevCatalog struct {
 }
 
 var (
-	kevMu       sync.Mutex
-	kevSet      map[string]struct{}
+	kevMu        sync.Mutex
+	kevSet       map[string]struct{}
 	kevFetchedAt time.Time
-	kevTTL      = time.Hour
+	kevTTL       = time.Hour
 )
 
 // kevContains returns true if the given CVE ID is in the CISA KEV catalog.

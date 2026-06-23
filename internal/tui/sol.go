@@ -288,7 +288,7 @@ func (s *solPane) processSSThree(b byte) {
 		s.curCol = min(s.curCol+1, s.cols-1)
 	case 'D':
 		s.curCol = max(s.curCol-1, 0)
-	// P, Q, R, S = F1-F4 in application mode — no action needed
+		// P, Q, R, S = F1-F4 in application mode — no action needed
 	}
 }
 

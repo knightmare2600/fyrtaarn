@@ -208,9 +208,9 @@ func NewCreateUserDialog() *Dialog {
 	pw2.Width = 30
 
 	return &Dialog{
-		Title: "Create User",
-		Body:  "Choose privilege level via the buttons below:",
-		inputs: []textinput.Model{nameInp, pw1, pw2},
+		Title:       "Create User",
+		Body:        "Choose privilege level via the buttons below:",
+		inputs:      []textinput.Model{nameInp, pw1, pw2},
 		inputLabels: []string{"Username", "Password", "Confirm"},
 		buttons: []DialogButton{
 			{Label: "User (2)", Action: "user-create-2"},

@@ -15,8 +15,8 @@ import (
 
 	"github.com/knightmare2600/fyrtaarn/internal/advisory"
 	"github.com/knightmare2600/fyrtaarn/internal/config"
-	"github.com/knightmare2600/fyrtaarn/internal/export"
 	"github.com/knightmare2600/fyrtaarn/internal/discovery"
+	"github.com/knightmare2600/fyrtaarn/internal/export"
 	"github.com/knightmare2600/fyrtaarn/internal/ipmi"
 	"github.com/knightmare2600/fyrtaarn/internal/misc"
 	"github.com/knightmare2600/fyrtaarn/internal/redfish"
@@ -168,9 +168,9 @@ type App struct {
 	loadProgress Progress
 	hostsFound   int
 
-	users        []ipmi.UserEntry
-	usersOffset  int
-	selectedUser int
+	users         []ipmi.UserEntry
+	usersOffset   int
+	selectedUser  int
 	pendingUserID int
 
 	firmwareResult   *ipmi.ComplianceResult
@@ -179,12 +179,12 @@ type App struct {
 	advisoryLoading  bool
 	nvdAPIKey        string
 
-	redfishEnum       *redfish.FullEnumeration
-	redfishOffset     int
+	redfishEnum   *redfish.FullEnumeration
+	redfishOffset int
 
-	solPane        *solPane
-	solGeneration  int  // incremented each session; guards stale solDoneMsg
-	solAfterPower  bool // when true, powerMsg "on" chains into SOL connect
+	solPane       *solPane
+	solGeneration int  // incremented each session; guards stale solDoneMsg
+	solAfterPower bool // when true, powerMsg "on" chains into SOL connect
 
 	sessionLog *os.File // nil when logging is off
 

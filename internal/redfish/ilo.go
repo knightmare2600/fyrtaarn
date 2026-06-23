@@ -5,10 +5,10 @@ package redfish
 // iLO versions differ significantly:
 //   - iLO 3/4: RIBCL XML over HTTPS; no standard Redfish VirtualMedia
 //   - iLO 5:   Redfish VirtualMedia present; slot paths are numeric
-//              (e.g. /redfish/v1/Managers/1/VirtualMedia/2/) — path sniffing
-//              won't find them; must filter by MediaTypes array
+//     (e.g. /redfish/v1/Managers/1/VirtualMedia/2/) — path sniffing
+//     won't find them; must filter by MediaTypes array
 //   - iLO 6:   Redfish VirtualMedia with session-token auth preferred over
-//              Basic Auth; large ISOs may require chunked transfer
+//     Basic Auth; large ISOs may require chunked transfer
 //
 // TODO: implement iloProvider.Insert and iloProvider.Eject
 // TODO: detect generation from product string (e.g. "iLO 5", "iLO 6")
