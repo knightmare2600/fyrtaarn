@@ -142,10 +142,9 @@ func (s *solPane) write(b []byte) {
 }
 
 // localBackspace erases the character to the left of the cursor immediately,
-// without waiting for the remote echo. GRUB's readline does not echo a visual
-// erase sequence over IPMI SOL, so we must apply the change ourselves.
-// absorbBS is incremented so that the first \b or \x7f the remote later sends
-// (bash readline echo: \b SPC \b) is absorbed rather than double-deleting.
+// providing instant visual feedback without waiting for the remote echo.
+// absorbBS is incremented so that GRUB's \x7f echo (or the leading \b of
+// bash's \b SPC \b response) is absorbed rather than double-deleting.
 func (s *solPane) localBackspace() {
 	if s.curCol > 0 {
 		s.curCol--
@@ -627,7 +626,7 @@ func keyToBytes(msg tea.KeyMsg) []byte {
 	case "enter":
 		return []byte{'\r'}
 	case "backspace", "ctrl+backspace":
-		return []byte{'\x08'} // BS — GRUB and serial firmware use Ctrl+H for erase
+		return []byte{'\x7f'} // DEL — GRUB readline erase char; \x08 is silently ignored
 	case "tab":
 		return []byte{'\t'}
 	case "up":

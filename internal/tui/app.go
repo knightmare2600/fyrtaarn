@@ -1686,11 +1686,10 @@ func (a *App) updateSOL(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Forward everything else to the pty.
 	if b := keyToBytes(msg); len(b) > 0 {
-		// GRUB's readline processes \x08 silently — no visual erase echo comes
-		// back over IPMI SOL. Apply the backspace locally so the display updates
-		// immediately. absorbBS absorbs any leading \b the remote later sends
-		// (bash readline echo is \b SPC \b) to prevent double-deletion.
-		if len(b) == 1 && b[0] == '\x08' {
+		// Apply backspace locally for immediate display feedback.
+		// absorbBS absorbs GRUB's \x7f echo (or bash's leading \b) so the
+		// remote echo does not double-delete.
+		if len(b) == 1 && (b[0] == '\x7f' || b[0] == '\x08') {
 			a.solPane.localBackspace()
 		}
 		a.solPane.write(b)
