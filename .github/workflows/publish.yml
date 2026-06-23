@@ -40,6 +40,10 @@ jobs:
             goarch: arm64
             binary: fyrtaarn-linux-arm64
           - goos: linux
+            goarch: arm
+            goarm: 7
+            binary: fyrtaarn-linux-armv7
+          - goos: linux
             goarch: ppc64
             binary: fyrtaarn-linux-ppc64
           - goos: linux
@@ -75,6 +79,7 @@ jobs:
         env:
           GOOS:        ${{ matrix.goos }}
           GOARCH:      ${{ matrix.goarch }}
+          GOARM:       ${{ matrix.goarm }}
           GOMIPS:      ${{ matrix.gomips }}
           GOMIPS64:    ${{ matrix.gomips64 }}
           CGO_ENABLED: 0
@@ -136,6 +141,7 @@ jobs:
           files: |
             dist/fyrtaarn-linux-amd64
             dist/fyrtaarn-linux-arm64
+            dist/fyrtaarn-linux-armv7
             dist/fyrtaarn-linux-ppc64
             dist/fyrtaarn-linux-mipsel
             dist/fyrtaarn-linux-mips64el
