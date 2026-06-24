@@ -73,6 +73,11 @@ type powerMsg struct {
 	Err    error
 }
 
+type solChassisCheckMsg struct {
+	host    string
+	powerOn bool // true = chassis on, go straight to SOL; false = show power-on dialog
+}
+
 type scanProgressMsg struct {
 	Text      string
 	HostFound bool    // a </host> was seen in the XML stream
@@ -421,6 +426,17 @@ func runExportCmd(path, format string, results []discovery.HostResult, details m
 	}
 }
 
+func checkChassisForSOL(host, user, pass string) tea.Cmd {
+	return func() tea.Msg {
+		status, err := ipmi.GetChassisStatus(host, user, pass)
+		if err != nil || status == nil {
+			// Can't determine state — assume on so SOL opens without the dialog.
+			return solChassisCheckMsg{host: host, powerOn: true}
+		}
+		return solChassisCheckMsg{host: host, powerOn: status.PowerOn}
+	}
+}
+
 func runRedfishEnum(host, user, pass string) tea.Cmd {
 	return func() tea.Msg {
 		result, err := redfish.EnumerateFull(host, user, pass)
@@ -692,6 +708,18 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.status = fmt.Sprintf("Redfish: %d system(s), %d manager(s)",
 			len(msg.Result.Systems), len(msg.Result.Managers))
 		return a, nil
+
+	case solChassisCheckMsg:
+		a.ipmiLoading = false
+		if !msg.powerOn {
+			a.activeDialog = NewPowerOnSOLDialog(msg.host)
+			return a, nil
+		}
+		// Chassis is on — open SOL directly.
+		a.status = "Starting SOL session with " + msg.host
+		cols := solDefaultCols
+		rows := max(a.contentH-4, 24)
+		return a, tea.Batch(a.spinner.Tick, startSOLPane(msg.host, a.username, a.password, cols, rows))
 
 	case powerMsg:
 		a.ipmiLoading = false
@@ -1411,18 +1439,12 @@ func (a *App) updateMCInfo(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		host := a.results[a.selectedHost].IP
-		// If the chassis is powered off, offer to power it on first so the
-		// user can watch the full boot sequence over SOL.
-		if a.chassis != nil && !a.chassis.PowerOn {
-			a.activeDialog = NewPowerOnSOLDialog(host)
-			return a, nil
-		}
+		// Do a live chassis check so we never show the power-on dialog for a
+		// chassis that is already running (cached data can be stale).
 		a.ipmiLoading = true
-		a.loadProgress = Progress{} // clear any stale scan bar
-		a.status = "Starting SOL session with " + host
-		cols := solDefaultCols // always 80 — BIOS/GRUB expect 80-col serial terminal
-		rows := max(a.contentH-4, 24)
-		return a, tea.Batch(a.spinner.Tick, startSOLPane(host, a.username, a.password, cols, rows))
+		a.loadProgress = Progress{}
+		a.status = "Checking chassis power state..."
+		return a, tea.Batch(a.spinner.Tick, checkChassisForSOL(host, a.username, a.password))
 
 	case "v":
 		a.activeDialog = NewVirtualMediaDialog()
