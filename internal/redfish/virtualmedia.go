@@ -84,11 +84,9 @@ func (p *genericProvider) Insert(isoURL string) error {
 		return fmt.Errorf("could not locate Redfish VirtualMedia InsertMedia action: %w", err)
 	}
 
-	body, _ := json.Marshal(map[string]any{
-		"Image":          isoURL,
-		"Inserted":       true,
-		"WriteProtected": true,
-	})
+	// "Image" is the only universally required field — iLO 4 HP OEM actions
+	// do not accept the standard Inserted/WriteProtected parameters.
+	body, _ := json.Marshal(map[string]any{"Image": isoURL})
 
 	return doPost(c, actionURL, p.user, p.pass, body)
 }
@@ -115,7 +113,7 @@ func findVMAction(c *http.Client, base, user, pass, actionName string) (string, 
 		return "", err
 	}
 
-	members, _ := jsonArray(mgrs, "Members")
+	members, _ := jsonArrayOf(mgrs, "Members")
 	if len(members) == 0 {
 		return "", fmt.Errorf("no Managers found")
 	}
@@ -142,7 +140,7 @@ func findVMAction(c *http.Client, base, user, pass, actionName string) (string, 
 			continue
 		}
 
-		vmMembers, _ := jsonArray(vmCol, "Members")
+		vmMembers, _ := jsonArrayOf(vmCol, "Members")
 		for _, vm := range vmMembers {
 			vmPath, _ := vm["@odata.id"].(string)
 			if vmPath == "" {
@@ -164,13 +162,23 @@ func findVMAction(c *http.Client, base, user, pass, actionName string) (string, 
 				continue
 			}
 
-			// Look for the action URL in Actions.
-			actions, _ := vmRes["Actions"].(map[string]any)
-			for k, v := range actions {
-				if strings.Contains(k, actionName) {
-					if av, ok := v.(map[string]any); ok {
-						if target, ok := av["target"].(string); ok && target != "" {
-							return base + target, nil
+			// 1. Standard Redfish: Actions["#VirtualMedia.InsertMedia"].
+			if target := vmActionTarget(vmRes["Actions"], actionName); target != "" {
+				return base + target, nil
+			}
+
+			// 2. HP iLO 4+ OEM: Oem.Hp.Actions / Oem.Hpe.Actions.
+			// iLO uses "InsertVirtualMedia"/"EjectVirtualMedia" rather than
+			// the standard "InsertMedia"/"EjectMedia".
+			oemName := strings.ReplaceAll(actionName, "Media", "VirtualMedia")
+			if oem, ok := vmRes["Oem"].(map[string]any); ok {
+				for _, ns := range []string{"Hp", "Hpe"} {
+					if vendor, ok := oem[ns].(map[string]any); ok {
+						if t := vmActionTarget(vendor["Actions"], actionName); t != "" {
+							return base + t, nil
+						}
+						if t := vmActionTarget(vendor["Actions"], oemName); t != "" {
+							return base + t, nil
 						}
 					}
 				}
@@ -179,6 +187,22 @@ func findVMAction(c *http.Client, base, user, pass, actionName string) (string, 
 	}
 
 	return "", fmt.Errorf("VirtualMedia %s action not found on any Manager", actionName)
+}
+
+// vmActionTarget scans an Actions map (or Oem.Vendor.Actions map) and returns
+// the target URL of the first action whose key contains name (substring match).
+func vmActionTarget(raw any, name string) string {
+	m, _ := raw.(map[string]any)
+	for k, v := range m {
+		if strings.Contains(k, name) {
+			if av, ok := v.(map[string]any); ok {
+				if target, _ := av["target"].(string); target != "" {
+					return target
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func doPost(c *http.Client, url, user, pass string, body []byte) error {
@@ -249,7 +273,7 @@ func vmHasMediaType(obj map[string]any, mediaType string) bool {
 	return false
 }
 
-func jsonArray(obj map[string]any, key string) ([]map[string]any, bool) {
+func jsonArrayOf(obj map[string]any, key string) ([]map[string]any, bool) {
 	raw, ok := obj[key].([]any)
 	if !ok {
 		return nil, false

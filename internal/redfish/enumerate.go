@@ -48,12 +48,7 @@ func EnumerateFull(host, user, pass string) (*FullEnumeration, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot fetch Systems collection: %w", err)
 	}
-	members, _ := jsonArray(sysCols, "Members")
-	for _, m := range members {
-		path, _ := m["@odata.id"].(string)
-		if path == "" {
-			continue
-		}
+	for _, path := range collectionPaths(sysCols) {
 		sys, err := fetchJSON(c, base+path, user, pass)
 		if err != nil {
 			continue
@@ -67,12 +62,7 @@ func EnumerateFull(host, user, pass string) (*FullEnumeration, error) {
 		// Non-fatal — not all BMCs expose Managers.
 		return out, nil
 	}
-	mgrMembers, _ := jsonArray(mgrCols, "Members")
-	for _, m := range mgrMembers {
-		path, _ := m["@odata.id"].(string)
-		if path == "" {
-			continue
-		}
+	for _, path := range collectionPaths(mgrCols) {
 		mgr, err := fetchJSON(c, base+path, user, pass)
 		if err != nil {
 			continue
@@ -81,6 +71,37 @@ func EnumerateFull(host, user, pass string) (*FullEnumeration, error) {
 	}
 
 	return out, nil
+}
+
+// collectionPaths returns member paths from a Redfish collection response.
+// Standard Redfish uses Members[*]["@odata.id"]; HP iLO 4 also provides
+// links.Member[*]["href"] — we check both and deduplicate.
+func collectionPaths(col map[string]any) []string {
+	seen := map[string]bool{}
+	var paths []string
+
+	add := func(p string) {
+		if p != "" && !seen[p] {
+			seen[p] = true
+			paths = append(paths, p)
+		}
+	}
+
+	// Standard: Members[*]["@odata.id"]
+	members, _ := jsonArrayOf(col, "Members")
+	for _, m := range members {
+		add(str(m, "@odata.id"))
+	}
+
+	// iLO 4 fallback: links.Member[*]["href"]
+	if links, ok := col["links"].(map[string]any); ok {
+		linked, _ := jsonArrayOf(links, "Member")
+		for _, m := range linked {
+			add(str(m, "href"))
+		}
+	}
+
+	return paths
 }
 
 func parseSystem(obj map[string]any) SystemInfo {
@@ -112,9 +133,13 @@ func parseSystem(obj map[string]any) SystemInfo {
 		if g, ok := ms["TotalSystemMemoryGiB"].(float64); ok {
 			s.MemoryGiB = g
 		}
-		// Status is a nested object {"HealthRollup": "OK"} — must drill in.
+		// Status is a nested object — must drill in.
+		// Standard Redfish uses "HealthRollup"; iLO 4 spells it "HealthRollUp".
 		if st, ok := ms["Status"].(map[string]any); ok {
 			s.MemoryHealth = str(st, "HealthRollup")
+			if s.MemoryHealth == "" {
+				s.MemoryHealth = str(st, "HealthRollUp")
+			}
 			if s.MemoryHealth == "" {
 				s.MemoryHealth = str(st, "Health")
 			}
