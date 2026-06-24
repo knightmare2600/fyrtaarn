@@ -29,14 +29,20 @@ var ErrNotImplemented = errors.New("virtual media: vendor backend not yet implem
 // manufacturer and product strings (as returned by Redfish or ipmitool mc info).
 // Falls back to the generic Redfish walker when no specific vendor match exists.
 //
-// TODO: dispatch to vendor backends once implemented:
+// iLO 4 (HP/HPE) is handled correctly by the generic provider: it walks
+// Managers → VirtualMedia, identifies the CD/DVD slot via MediaTypes, and
+// finds the HP OEM action URLs under Oem.Hp.Actions. No separate iloProvider
+// backend is needed for iLO 4.
 //
-//	"hp" / "hpe"       → ilo.go   (iloProvider, generation detected from product string)
-//	"dell"             → drac.go  (idracProvider, gen 7/8/9 detected from product string)
-//	"supermicro"       → supermicro.go
-//	"oracle" / "sun"   → lom.go
-//	"lenovo"           → xcc.go
-//	"cisco"            → cimc.go
+// TODO: dispatch to vendor backends for cases the generic provider cannot handle:
+//
+//	"hp" / "hpe"  (iLO 3)  → ilo.go  (RIBCL XML path, no Redfish)
+//	"hp" / "hpe"  (iLO 5+) → ilo.go  (session-token auth, chunked transfer on iLO 6)
+//	"dell"                  → drac.go (iDRAC 7/8 WSMAN; iDRAC 9 Redfish + Dell OEM)
+//	"supermicro"            → supermicro.go
+//	"oracle" / "sun"        → lom.go
+//	"lenovo"                → xcc.go
+//	"cisco"                 → cimc.go
 func NewProvider(host, user, pass, manufacturer, _ string) VirtualMediaProvider {
 	return &genericProvider{host: host, user: user, pass: pass}
 }
