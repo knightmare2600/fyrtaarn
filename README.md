@@ -90,7 +90,7 @@ The name reflects the project's purpose: visibility, remote control, and infrast
   - Cyan — informational (default)
 - **FRU / hardware inventory** — scrollable `ipmitool fru` output with device section headers
 - **Power control** — on, off, soft shutdown, reset; dialog shows current chassis power state
-- **SOL console** — Serial over LAN runs inside a TUI pane (`[O]` from BMC Info); ipmitool executes in a pty so the menu bar and status bar stay visible; full VT100/VT220 screen emulator (cols×rows character grid) — cursor positioning, clear-screen, scroll regions, insert/delete lines, erase-in-line/display, and all standard CSI sequences are honoured so GRUB menus, AMI/Award BIOS splashes, and interactive programs render correctly; bare `\r` (firmware line endings) and `\r\n` both handled; backspace sends `\x08` (BS) for compatibility with GRUB's readline and serial firmware; 1000-line scrollback history; `[F10]` disconnect; `[PgUp/PgDn]` scroll; all keys including F1–F12 forwarded to the BMC; Ctrl+C forwarded rather than quitting the app; if the chassis is powered off `[O]` prompts to power it on first and connects SOL immediately so the full boot sequence is captured from BIOS POST
+- **SOL console** — Serial over LAN runs inside a TUI pane (`[O]` from BMC Info); ipmitool executes in a pty so the menu bar and status bar stay visible; full VT100/VT220 screen emulator (cols×rows character grid) — cursor positioning, clear-screen, scroll regions, insert/delete lines, erase-in-line/display, and all standard CSI sequences are honoured so GRUB menus, AMI/Award BIOS splashes, and interactive programs render correctly; bare `\r` (firmware line endings) and `\r\n` both handled; backspace is implemented as `ESC[D` + `Ctrl+D` (cursor-left then forward-delete) so it works correctly in GRUB's readline regardless of which erase character the BMC serial port uses; 1000-line scrollback history; `[F10]` disconnect; `[PgUp/PgDn]` scroll; all keys including F1–F12 forwarded to the BMC; Ctrl+C forwarded rather than quitting the app; pressing `[O]` performs a live chassis power check — if the chassis is off a dialog offers to power it on and open SOL immediately so the full boot sequence is captured from BIOS POST; if the chassis is already on SOL opens directly without a dialog
 - **Virtual media** — Redfish ISO mount and eject via `InsertMedia`/`EjectMedia` actions; walks `Managers → VirtualMedia` to find the CD/DVD slot (`[V]` from BMC Info; requires Redfish-capable host)
 - **Direct connect** — File > Connect to BMC opens a dialog (IP, username, password) and connects without running a scan; host is added to the results tree so all subsequent operations work normally
 - **Session log** — File > Start Log… prompts for a file path and begins logging all activity; SOL output is written as rendered plain text (lines are flushed to the log as they scroll off the top of the VT100 screen buffer, final screen state captured on disconnect); scan results, BMC connections, and SOL start/end events are logged with timestamps; File > Stop Log closes the file
@@ -344,7 +344,7 @@ sudo ./dist/fyrtaarn
 | C                      | BMC Info          | Run firmware compliance check                 |
 | R                      | BMC Info          | Redfish full enumeration                      |
 | P                      | BMC Info          | Power control dialog                          |
-| O                      | BMC Info          | Open SOL console; prompts to power on if off  |
+| O                      | BMC Info          | Live chassis check; opens SOL or prompts to power on if off |
 | F10                    | SOL Console       | Disconnect and return                         |
 | PgUp                   | SOL Console       | Scroll up through history                     |
 | PgDn                   | SOL Console       | Scroll down / snap to live bottom             |
@@ -447,6 +447,11 @@ For detailed technical writeups and excellent explanations of:
 ---
 
 ## Changelog
+
+### 0.6.2
+
+- **SOL backspace** — neither `\x08` (silently discarded by some GRUB builds) nor `\x7f` (treated as a printable dot character and stuffed into the command buffer) worked as a reliable erase character over IPMI SOL. Backspace is now implemented as the two-stroke sequence `ESC[D` (cursor-left, mapped by GRUB's serial driver to `GRUB_TERM_KEY_LEFT`) followed by `\x04` (Ctrl+D, `GRUB_TERM_CTRL|'d'` = delete-char-at-cursor). The net effect is backward-delete that works correctly in GRUB's readline without depending on any erase-character setting. An `editBuf` shadow tracks typed characters so the sequence is only sent when there is actually a character to the left of the cursor, preventing accidental Ctrl+D EOF on an empty line. Works correctly in bash readline over SOL as well.
+- **SOL chassis power check** — pressing `[O]` (SOL) now performs a live `ipmitool chassis status` query rather than relying on the power state cached when MCInfo was loaded. Stale cache data (chassis was off at load time but is now running) no longer causes the power-on dialog to fire incorrectly. A spinner is shown during the brief IPMI round-trip. If the live check fails the old behaviour is preserved: SOL opens directly without a dialog.
 
 ### 0.6.1
 
