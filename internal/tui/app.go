@@ -711,15 +711,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case solChassisCheckMsg:
 		a.ipmiLoading = false
-		if !msg.powerOn {
-			a.activeDialog = NewPowerOnSOLDialog(msg.host)
-			return a, nil
-		}
-		// Chassis is on — open SOL directly.
-		a.status = "Starting SOL session with " + msg.host
-		cols := solDefaultCols
-		rows := max(a.contentH-4, 24)
-		return a, tea.Batch(a.spinner.Tick, startSOLPane(msg.host, a.username, a.password, cols, rows))
+		// Always show the dialog so the user sees the actual reported power state.
+		// This guards against parseChassisStatus returning a zero-value struct
+		// (PowerOn=false) when the BMC uses an unexpected key format.
+		a.activeDialog = NewSOLLaunchDialog(msg.host, msg.powerOn)
+		return a, nil
 
 	case powerMsg:
 		a.ipmiLoading = false
@@ -1009,6 +1005,19 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 		a.status = "Enumerating " + host.IP
 		a.ipmiLoading = true
 		return a, tea.Batch(a.spinner.Tick, runMCInfo(host.IP, a.username, a.password))
+
+	case "open-sol":
+		a.activeDialog = nil
+		if len(a.results) == 0 {
+			return a, nil
+		}
+		host := a.results[a.selectedHost].IP
+		a.ipmiLoading = true
+		a.loadProgress = Progress{}
+		a.status = "Starting SOL session with " + host
+		cols := solDefaultCols
+		rows := max(a.contentH-4, 24)
+		return a, tea.Batch(a.spinner.Tick, startSOLPane(host, a.username, a.password, cols, rows))
 
 	case "power-on-sol":
 		a.activeDialog = nil

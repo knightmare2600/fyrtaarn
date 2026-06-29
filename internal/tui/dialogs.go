@@ -432,10 +432,24 @@ func renderButton(label string, focused, disabled bool) string {
 		Render("[ " + label + " ]")
 }
 
-// NewPowerOnSOLDialog is shown when the user presses O (SOL) and the chassis
-// is currently powered off. It offers to power on and immediately open SOL so
-// the user can watch the full boot sequence from BIOS onwards.
-func NewPowerOnSOLDialog(host string) *Dialog {
+// NewSOLLaunchDialog is shown when the user presses O (SOL) after the live
+// chassis check completes. When powerOn is false the dialog offers to power
+// the chassis on before connecting; when powerOn is true it offers a direct
+// SOL connection with a confirmation step so the user sees the actual state.
+func NewSOLLaunchDialog(host string, powerOn bool) *Dialog {
+	if powerOn {
+		return &Dialog{
+			Title: "Chassis is Powered On",
+			Body: fmt.Sprintf(
+				"The chassis on %s is powered on.\n\n"+
+					"Open the SOL console now?", host),
+			buttons: []DialogButton{
+				{Label: "Open SOL", Action: "open-sol"},
+				{Label: "Cancel", Action: "cancel"},
+			},
+			focus: 0,
+		}
+	}
 	return &Dialog{
 		Title: "Chassis is Powered Off",
 		Body: fmt.Sprintf(
