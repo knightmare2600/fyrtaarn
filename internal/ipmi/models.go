@@ -16,11 +16,12 @@ type LANInfo struct {
 }
 
 type ChassisStatus struct {
-	PowerOn       bool
-	PowerOverload bool
-	PowerFault    bool
-	DriveFault    bool
-	CoolingFault  bool
+	PowerOn         bool
+	PowerStateFound bool // true only when the "System Power" key was present in output
+	PowerOverload   bool
+	PowerFault      bool
+	DriveFault      bool
+	CoolingFault    bool
 }
 
 type HostDetails struct {

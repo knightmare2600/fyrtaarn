@@ -221,7 +221,8 @@ func parseChassisStatus(data string) *ChassisStatus {
 
 		switch key {
 		case "System Power":
-			status.PowerOn = strings.ToLower(value) == "on"
+			status.PowerStateFound = true
+			status.PowerOn = strings.HasPrefix(strings.ToLower(value), "on")
 		case "Power Overload":
 			status.PowerOverload = strings.ToLower(value) == "true"
 		case "Main Power Fault":

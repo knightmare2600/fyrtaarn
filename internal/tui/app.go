@@ -429,8 +429,8 @@ func runExportCmd(path, format string, results []discovery.HostResult, details m
 func checkChassisForSOL(host, user, pass string) tea.Cmd {
 	return func() tea.Msg {
 		status, err := ipmi.GetChassisStatus(host, user, pass)
-		if err != nil || status == nil {
-			// Can't determine state — assume on so SOL opens without the dialog.
+		if err != nil || status == nil || !status.PowerStateFound {
+			// Can't determine state — assume on so the dialog shows "Powered On".
 			return solChassisCheckMsg{host: host, powerOn: true}
 		}
 		return solChassisCheckMsg{host: host, powerOn: status.PowerOn}
