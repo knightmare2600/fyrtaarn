@@ -6,11 +6,28 @@ import (
 	"path/filepath"
 )
 
+// RecentConnection is one entry in the last-N-connected-to list shown under
+// File > Recent Connections. Only IP and username are persisted — passwords
+// are never written to disk.
+type RecentConnection struct {
+	IP       string `json:"ip"`
+	Username string `json:"username,omitempty"`
+}
+
+// Favourite is one user-pinned host shown under File > Favourites. Only IP
+// and username are persisted — passwords are never written to disk.
+type Favourite struct {
+	IP       string `json:"ip"`
+	Username string `json:"username,omitempty"`
+}
+
 type Config struct {
-	Theme      string `json:"theme"`
-	LastSubnet string `json:"last_subnet"`
-	LastPorts  string `json:"last_ports"`
-	NVDAPIKey  string `json:"nvd_api_key,omitempty"`
+	Theme             string             `json:"theme"`
+	LastSubnet        string             `json:"last_subnet"`
+	LastPorts         string             `json:"last_ports"`
+	NVDAPIKey         string             `json:"nvd_api_key,omitempty"`
+	RecentConnections []RecentConnection `json:"recent_connections,omitempty"`
+	Favourites        []Favourite        `json:"favourites,omitempty"`
 }
 
 func path() (string, error) {
@@ -50,4 +67,17 @@ func Save(cfg Config) error {
 		return err
 	}
 	return os.WriteFile(p, data, 0o600)
+}
+
+// Update loads the config as currently on disk, applies mutate to it, and
+// writes the result back. Any field mutate doesn't touch is preserved
+// exactly as it was on disk — callers only need to know about the field(s)
+// they're changing, not reconstruct the whole struct. This is the only
+// correct way to persist a single setting: building a fresh Config{...}
+// literal at the call site silently drops every other saved field back to
+// its zero value.
+func Update(mutate func(*Config)) error {
+	cfg := Load()
+	mutate(&cfg)
+	return Save(cfg)
 }

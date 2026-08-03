@@ -39,6 +39,8 @@ const (
 	screenSOL
 )
 
+const maxRecentConnections = 5
+
 /* ---------------- MESSAGES ---------------- */
 
 type scanFinishedMsg struct {
@@ -76,6 +78,11 @@ type powerMsg struct {
 type solChassisCheckMsg struct {
 	host    string
 	powerOn bool // true = chassis on, go straight to SOL; false = show power-on dialog
+}
+
+type powerDialogCheckMsg struct {
+	host  string
+	state string // "On", "Off", or "Unknown" — passed straight to NewPowerDialog
 }
 
 type scanProgressMsg struct {
@@ -141,14 +148,19 @@ type App struct {
 
 	currentScreen screen
 
-	menuBar      MenuBar
-	activeDialog *Dialog
+	menuBar         MenuBar
+	activeDialog    *Dialog
+	activeFavDialog *FavouritesDialog
 
 	username      string
 	password      string
 	lastSubnet    string
 	lastPorts     string
 	scanPerformed bool
+	isRoot        bool // cached at startup; drives the status bar reminder
+
+	recentConnections []config.RecentConnection
+	favourites        []config.Favourite
 
 	mcInfo  *ipmi.MCInfo
 	lanInfo *ipmi.LANInfo
@@ -218,17 +230,125 @@ func NewApp() *App {
 		lastSubnet = "192.168.0.0/24"
 	}
 
-	return &App{
-		status:        "Ready — press F9 for menu",
-		currentScreen: screenResults,
-		menuBar:       NewMenuBar(),
-		spinner:       sp,
-		sessionCache:  session.NewCache(),
-		detailsCache:  make(map[string]*ipmi.HostDetails),
-		lastSubnet:    lastSubnet,
-		lastPorts:     cfg.LastPorts,
-		nvdAPIKey:     cfg.NVDAPIKey,
+	recent := cfg.RecentConnections
+	if len(recent) > maxRecentConnections {
+		recent = recent[:maxRecentConnections]
 	}
+	favs := cfg.Favourites
+	if len(favs) > maxFavourites {
+		favs = favs[:maxFavourites]
+	}
+
+	a := &App{
+		status:            "Ready — press F9 for menu",
+		currentScreen:     screenResults,
+		menuBar:           NewMenuBar(),
+		spinner:           sp,
+		sessionCache:      session.NewCache(),
+		detailsCache:      make(map[string]*ipmi.HostDetails),
+		lastSubnet:        lastSubnet,
+		lastPorts:         cfg.LastPorts,
+		nvdAPIKey:         cfg.NVDAPIKey,
+		recentConnections: recent,
+		favourites:        favs,
+		isRoot:            util.IsRoot(),
+	}
+	a.refreshRecentMenu()
+	a.refreshFavouritesMenu()
+	return a
+}
+
+// refreshRecentMenu rebuilds the File > Recent Connections submenu from
+// a.recentConnections.
+func (a *App) refreshRecentMenu() {
+	items := make([]SubItem, 0, len(a.recentConnections))
+	for i, rc := range a.recentConnections {
+		label := rc.IP
+		if rc.Username != "" {
+			label += " (" + rc.Username + ")"
+		}
+		items = append(items, SubItem{Label: label, Action: fmt.Sprintf("recent-connect:%d", i)})
+	}
+	if len(items) == 0 {
+		items = append(items, SubItem{Label: "(none yet)"})
+	}
+	a.menuBar.SetRecentConnections(items)
+}
+
+// refreshFavouritesMenu rebuilds the File > Favourites submenu from
+// a.favourites.
+func (a *App) refreshFavouritesMenu() {
+	items := make([]SubItem, 0, len(a.favourites))
+	for i, fav := range a.favourites {
+		label := fav.IP
+		if fav.Username != "" {
+			label += " (" + fav.Username + ")"
+		}
+		items = append(items, SubItem{Label: label, Action: fmt.Sprintf("fav-connect:%d", i)})
+	}
+	a.menuBar.SetFavourites(items)
+}
+
+// recordRecentConnection promotes host to the front of the recent-connections
+// list (moving it there if already present), trims to maxRecentConnections,
+// refreshes the menu, and persists.
+func (a *App) recordRecentConnection(ip, username string) {
+	filtered := make([]config.RecentConnection, 0, len(a.recentConnections)+1)
+	filtered = append(filtered, config.RecentConnection{IP: ip, Username: username})
+	for _, rc := range a.recentConnections {
+		if rc.IP != ip {
+			filtered = append(filtered, rc)
+		}
+	}
+	if len(filtered) > maxRecentConnections {
+		filtered = filtered[:maxRecentConnections]
+	}
+	a.recentConnections = filtered
+	a.refreshRecentMenu()
+	_ = config.Update(func(c *config.Config) {
+		c.RecentConnections = a.recentConnections
+	})
+}
+
+// connectToHost is the shared entry point for File > Recent Connections and
+// File > Favourites selections. It adds the host to the results tree if not
+// already present, reuses a cached session if one exists (mirroring the
+// results-tree Enter behaviour), and otherwise opens the direct-connect
+// dialog pre-filled with the known IP and username.
+func (a *App) connectToHost(ip, username string) (tea.Model, tea.Cmd) {
+	if ip == "" {
+		return a, nil
+	}
+
+	targetIdx := -1
+	for i, r := range a.results {
+		if r.IP == ip {
+			targetIdx = i
+			break
+		}
+	}
+	if targetIdx < 0 {
+		a.results = append(a.results, discovery.HostResult{
+			IP:         ip,
+			IsBMC:      true,
+			Confidence: 100,
+			Vendor:     "Direct",
+		})
+		targetIdx = len(a.results) - 1
+	}
+	a.selectedHost = targetIdx
+	a.currentScreen = screenResults
+
+	if user, pass, ok := a.sessionCache.Get(ip); ok {
+		a.username = user
+		a.password = pass
+		a.ipmiLoading = true
+		a.status = "Reconnecting to " + ip
+		return a, tea.Batch(a.spinner.Tick, runMCInfo(ip, user, pass))
+	}
+
+	a.activeDialog = NewConnectBMCDialog(ip, username)
+	return a, textinput.Blink
 }
 
 /* ---------------- COMMANDS ---------------- */
@@ -437,6 +557,19 @@ func checkChassisForSOL(host, user, pass string) tea.Cmd {
 	}
 }
 
+func checkChassisForPower(host, user, pass string) tea.Cmd {
+	return func() tea.Msg {
+		status, err := ipmi.GetChassisStatus(host, user, pass)
+		if err != nil || status == nil || !status.PowerStateFound {
+			return powerDialogCheckMsg{host: host, state: "Unknown"}
+		}
+		if status.PowerOn {
+			return powerDialogCheckMsg{host: host, state: "On"}
+		}
+		return powerDialogCheckMsg{host: host, state: "Off"}
+	}
+}
+
 func runRedfishEnum(host, user, pass string) tea.Cmd {
 	return func() tea.Msg {
 		result, err := redfish.EnumerateFull(host, user, pass)
@@ -551,6 +684,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			hostIP := a.results[a.selectedHost].IP
 			a.sessionCache.Set(hostIP, a.username, a.password)
 			a.detailsCache[hostIP] = &ipmi.HostDetails{MCInfo: msg.Info, LAN: msg.LAN, Chassis: msg.Chassis}
+			a.recordRecentConnection(hostIP, a.username)
 		}
 		a.mcInfo = msg.Info
 		a.lanInfo = msg.LAN
@@ -717,6 +851,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.activeDialog = NewSOLLaunchDialog(msg.host, msg.powerOn)
 		return a, nil
 
+	case powerDialogCheckMsg:
+		a.ipmiLoading = false
+		a.activeDialog = NewPowerDialog(msg.host, msg.state)
+		return a, nil
+
 	case powerMsg:
 		a.ipmiLoading = false
 		if msg.Err != nil {
@@ -862,6 +1001,22 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Favourites management modal routing.
+		if a.activeFavDialog != nil {
+			changed, closed, cmd := a.activeFavDialog.Update(msg)
+			if changed {
+				a.favourites = a.activeFavDialog.items
+				_ = config.Update(func(c *config.Config) {
+					c.Favourites = a.favourites
+				})
+				a.refreshFavouritesMenu()
+			}
+			if closed {
+				a.activeFavDialog = nil
+			}
+			return a, cmd
+		}
+
 		// Screen-specific handlers.
 		switch a.currentScreen {
 		case screenResults:
@@ -901,8 +1056,25 @@ func (a *App) handleMenuAction(action string) (tea.Model, tea.Cmd) {
 	case action == "quit":
 		return a, a.quit()
 	case action == "connect-bmc-dialog":
-		a.activeDialog = NewConnectBMCDialog(a.username)
+		a.activeDialog = NewConnectBMCDialog("", a.username)
 		return a, textinput.Blink
+	case action == "favourites-dialog":
+		a.activeFavDialog = NewFavouritesDialog(a.favourites)
+		return a, nil
+	case strings.HasPrefix(action, "recent-connect:"):
+		idx, _ := strconv.Atoi(strings.TrimPrefix(action, "recent-connect:"))
+		if idx >= 0 && idx < len(a.recentConnections) {
+			rc := a.recentConnections[idx]
+			return a.connectToHost(rc.IP, rc.Username)
+		}
+		return a, nil
+	case strings.HasPrefix(action, "fav-connect:"):
+		idx, _ := strconv.Atoi(strings.TrimPrefix(action, "fav-connect:"))
+		if idx >= 0 && idx < len(a.favourites) {
+			fav := a.favourites[idx]
+			return a.connectToHost(fav.IP, fav.Username)
+		}
+		return a, nil
 	case action == "log-start-dialog":
 		a.activeDialog = NewLogDialog()
 		return a, textinput.Blink
@@ -929,7 +1101,9 @@ func (a *App) handleMenuAction(action string) (tea.Model, tea.Cmd) {
 		name := strings.TrimPrefix(action, "theme:")
 		SetTheme(name)
 		a.status = "Theme: " + name
-		_ = config.Save(config.Config{Theme: name, LastSubnet: a.lastSubnet, NVDAPIKey: a.nvdAPIKey})
+		_ = config.Update(func(c *config.Config) {
+			c.Theme = name
+		})
 	}
 	return a, nil
 }
@@ -975,11 +1149,9 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 		if action == "scan-custom" && customPorts != "" {
 			a.lastPorts = customPorts
 		}
-		_ = config.Save(config.Config{
-			Theme:      CurrentTheme.Name,
-			LastSubnet: subnet,
-			LastPorts:  a.lastPorts,
-			NVDAPIKey:  a.nvdAPIKey,
+		_ = config.Update(func(c *config.Config) {
+			c.LastSubnet = a.lastSubnet
+			c.LastPorts = a.lastPorts
 		})
 		a.scanning = true
 		a.hostsFound = 0
@@ -1432,16 +1604,12 @@ func (a *App) updateMCInfo(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		host := a.results[a.selectedHost].IP
-		currentState := "Unknown"
-		if a.chassis != nil {
-			if a.chassis.PowerOn {
-				currentState = "On"
-			} else {
-				currentState = "Off"
-			}
-		}
-		a.activeDialog = NewPowerDialog(host, currentState)
-		return a, nil
+		// Live chassis check so the dialog reflects the actual current state
+		// rather than whatever was cached when MC Info was last loaded.
+		a.ipmiLoading = true
+		a.loadProgress = Progress{}
+		a.status = "Checking chassis power state..."
+		return a, tea.Batch(a.spinner.Tick, checkChassisForPower(host, a.username, a.password))
 
 	case "o":
 		if len(a.results) == 0 {
@@ -1769,7 +1937,9 @@ func (a *App) CycleTheme() {
 	next := themes[(currentIdx+1)%len(themes)]
 	SetTheme(next)
 	a.status = fmt.Sprintf("Theme: %s", next)
-	_ = config.Save(config.Config{Theme: next, LastSubnet: a.lastSubnet})
+	_ = config.Update(func(c *config.Config) {
+		c.Theme = next
+	})
 }
 
 /* ---------------- VIEW ---------------- */
@@ -1797,6 +1967,8 @@ func (a *App) View() string {
 	if a.activeDialog != nil {
 		// lipgloss.Place fills the full viewport with Background already.
 		content = a.activeDialog.Render(a.width, a.contentH)
+	} else if a.activeFavDialog != nil {
+		content = a.activeFavDialog.Render(a.width, a.contentH)
 	} else {
 		if a.scanning || a.ipmiLoading {
 			content = a.renderLoading()
@@ -1854,7 +2026,23 @@ func (a *App) View() string {
 		content = strings.Join(lines, "\n")
 	}
 
-	right := fmt.Sprintf("[F9] Menu  Theme: %s", CurrentTheme.Name)
+	menuInfo := fmt.Sprintf("[F9] Menu  Theme: %s", CurrentTheme.Name)
+	right := menuInfo
+	if !a.isRoot {
+		// Reminder that some operations (SYN/UDP scan) are degraded without
+		// root — not fatal, so this is informational only, not a warning
+		// dialog. Both fragments must carry the chrome background explicitly:
+		// the amber style's own trailing reset would otherwise clobber the
+		// outer status-bar background for the text that follows it.
+		warnStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color(CurrentTheme.Chrome)).
+			Foreground(lipgloss.Color("#CB4B16")).
+			Bold(true)
+		menuStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color(CurrentTheme.Chrome)).
+			Foreground(lipgloss.Color(CurrentTheme.ChromeFg))
+		right = warnStyle.Render("⚠ not root") + menuStyle.Render("  "+menuInfo)
+	}
 	var left string
 	switch {
 	case a.scanning:
@@ -2049,6 +2237,9 @@ func boolCached(v bool) string {
 func (a *App) screenStatusHint() string {
 	if a.activeDialog != nil {
 		return "[Tab] Next  [Enter] Select  [Esc] Cancel"
+	}
+	if a.activeFavDialog != nil {
+		return a.activeFavDialog.HintText()
 	}
 
 	visibleLines := a.contentH - 6

@@ -57,6 +57,12 @@ func NewMenuBar() MenuBar {
 				Accel: 'F',
 				Items: []SubItem{
 					{Label: "Connect to BMC", Accel: 'C', Action: "connect-bmc-dialog"},
+					{Label: "Recent Connections", Accel: 'R', Children: []SubItem{
+						{Label: "(none yet)"},
+					}},
+					{Label: "Favourites", Accel: 'V', Children: []SubItem{
+						{Label: "Manage Favourites...", Accel: 'M', Action: "favourites-dialog"},
+					}},
 					{Sep: true},
 					{Label: "New Scan", Accel: 'N', Action: "new-scan"},
 					{Label: "Export...", Accel: 'E', Action: "export"},
@@ -77,6 +83,37 @@ func NewMenuBar() MenuBar {
 				},
 			},
 		},
+	}
+}
+
+// SetRecentConnections replaces the File > Recent Connections submenu.
+func (m *MenuBar) SetRecentConnections(items []SubItem) {
+	m.setFileChildren("Recent Connections", items)
+}
+
+// SetFavourites replaces the File > Favourites submenu (below the fixed
+// "Manage Favourites..." entry).
+func (m *MenuBar) SetFavourites(items []SubItem) {
+	children := []SubItem{
+		{Label: "Manage Favourites...", Accel: 'M', Action: "favourites-dialog"},
+	}
+	if len(items) > 0 {
+		children = append(children, SubItem{Sep: true})
+		children = append(children, items...)
+	}
+	m.setFileChildren("Favourites", children)
+}
+
+// setFileChildren finds the top-level item with the given label (searching
+// all menus, though both callers target File) and replaces its Children.
+func (m *MenuBar) setFileChildren(label string, children []SubItem) {
+	for mi := range m.menus {
+		for ii := range m.menus[mi].Items {
+			if m.menus[mi].Items[ii].Label == label {
+				m.menus[mi].Items[ii].Children = children
+				return
+			}
+		}
 	}
 }
 

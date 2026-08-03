@@ -144,6 +144,10 @@ func NewLoginDialog(defaultUsername string) *Dialog {
 	}
 }
 
+// NewPowerDialog builds the [P] Power Control dialog. currentState is the
+// live chassis state ("On", "Off", or "Unknown") — the button matching the
+// current state is dimmed so the dialog never presents an already-current
+// state as an available action.
 func NewPowerDialog(host, currentState string) *Dialog {
 	body := "Host: " + host
 	if currentState != "" {
@@ -153,9 +157,9 @@ func NewPowerDialog(host, currentState string) *Dialog {
 		Title: "Power Control",
 		Body:  body,
 		buttons: []DialogButton{
-			{Label: "Power On", Action: "on"},
-			{Label: "Power Off", Action: "off"},
-			{Label: "Soft Shutdown", Action: "soft"},
+			{Label: "Power On", Action: "on", Disabled: currentState == "On"},
+			{Label: "Power Off", Action: "off", Disabled: currentState == "Off"},
+			{Label: "Soft Shutdown", Action: "soft", Disabled: currentState == "Off"},
 			{Label: "Reset", Action: "reset"},
 			{Label: "Cancel", Action: "cancel"},
 		},
@@ -466,12 +470,16 @@ func NewSOLLaunchDialog(host string, powerOn bool) *Dialog {
 }
 
 // NewConnectBMCDialog prompts for a BMC IP and credentials to connect directly,
-// bypassing the discovery scan.
-func NewConnectBMCDialog(defaultUsername string) *Dialog {
+// bypassing the discovery scan. defaultIP and defaultUsername pre-fill their
+// fields when non-empty (used by Recent Connections / Favourites); focus
+// starts on the password field when both are already known.
+func NewConnectBMCDialog(defaultIP, defaultUsername string) *Dialog {
 	ipInp := textinput.New()
 	ipInp.Placeholder = "192.168.1.100"
 	ipInp.Width = 25
-	ipInp.Focus()
+	if defaultIP != "" {
+		ipInp.SetValue(defaultIP)
+	}
 
 	userInp := textinput.New()
 	userInp.Placeholder = "admin"
@@ -486,7 +494,15 @@ func NewConnectBMCDialog(defaultUsername string) *Dialog {
 	passInp.EchoCharacter = '•'
 	passInp.Width = 20
 
-	return &Dialog{
+	focus := 0
+	if defaultIP != "" && defaultUsername != "" {
+		focus = 2
+		passInp.Focus()
+	} else {
+		ipInp.Focus()
+	}
+
+	dlg := &Dialog{
 		Title:       "Connect to BMC",
 		Body:        "Connect directly to a known BMC — no scan required.",
 		inputs:      []textinput.Model{ipInp, userInp, passInp},
@@ -495,8 +511,9 @@ func NewConnectBMCDialog(defaultUsername string) *Dialog {
 			{Label: "Connect", Action: "connect-bmc"},
 			{Label: "Cancel", Action: "cancel"},
 		},
-		focus: 0,
+		focus: focus,
 	}
+	return dlg
 }
 
 // NewLogDialog prompts for a file path to write the session log to.
