@@ -16,7 +16,9 @@ import (
 // genericProvider (this file) is the Redfish-standard fallback.
 type VirtualMediaProvider interface {
 	// Insert mounts an ISO image. isoURL must be reachable by the BMC itself
-	// (HTTP/HTTPS) — the BMC fetches the image, not the client.
+	// (HTTP/HTTPS) — the BMC fetches the image, not the client. A local
+	// file path is not accepted here: the TUI layer resolves one to a URL
+	// first via ServeLocalISO (see localmedia.go).
 	Insert(isoURL string) error
 	// Eject unmounts the currently loaded virtual media.
 	Eject() error
@@ -34,16 +36,23 @@ var ErrNotImplemented = errors.New("virtual media: vendor backend not yet implem
 // finds the HP OEM action URLs under Oem.Hp.Actions. No separate iloProvider
 // backend is needed for iLO 4.
 //
+// Supermicro dispatches to supermicroProvider, which probes for AMI
+// MegaRAC's standard-schema Redfish VirtualMedia (also generic-provider
+// compatible) before attempting it, so IKVM-only firmware generations get a
+// clear unsupported error instead of a raw 404.
+//
 // TODO: dispatch to vendor backends for cases the generic provider cannot handle:
 //
 //	"hp" / "hpe"  (iLO 3)  → ilo.go  (RIBCL XML path, no Redfish)
 //	"hp" / "hpe"  (iLO 5+) → ilo.go  (session-token auth, chunked transfer on iLO 6)
 //	"dell"                  → drac.go (iDRAC 7/8 WSMAN; iDRAC 9 Redfish + Dell OEM)
-//	"supermicro"            → supermicro.go
 //	"oracle" / "sun"        → lom.go
 //	"lenovo"                → xcc.go
 //	"cisco"                 → cimc.go
 func NewProvider(host, user, pass, manufacturer, _ string) VirtualMediaProvider {
+	if strings.Contains(strings.ToLower(manufacturer), "supermicro") {
+		return &supermicroProvider{host: host, user: user, pass: pass}
+	}
 	return &genericProvider{host: host, user: user, pass: pass}
 }
 
@@ -56,27 +65,25 @@ func httpClient() *http.Client {
 	}
 }
 
-// InsertMedia mounts an ISO image. It delegates to NewProvider, which
-// currently falls through to the generic Redfish walker for all vendors.
-// Once vendor backends are implemented, callers should pass manufacturer and
-// product so the correct backend is selected.
-func InsertMedia(host, isoURL, user, pass string) error {
-	return NewProvider(host, user, pass, "", "").Insert(isoURL)
+// InsertMedia mounts an ISO image, dispatching to the vendor-specific
+// backend NewProvider selects for manufacturer (empty string falls through
+// to the generic Redfish walker).
+func InsertMedia(host, isoURL, user, pass, manufacturer string) error {
+	return NewProvider(host, user, pass, manufacturer, "").Insert(isoURL)
 }
 
 // EjectMedia unmounts the current virtual media. See InsertMedia.
-func EjectMedia(host, user, pass string) error {
-	return NewProvider(host, user, pass, "", "").Eject()
+func EjectMedia(host, user, pass, manufacturer string) error {
+	return NewProvider(host, user, pass, manufacturer, "").Eject()
 }
 
 // genericProvider is the Redfish-standard fallback used until a vendor-specific
 // backend is written. It walks Managers → VirtualMedia and posts to the first
 // CD/DVD slot that advertises the requested action.
 //
-// Known limitation: slot discovery filters by "cd"/"dvd" in the @odata.id path,
-// which misses HP iLO (numeric paths) and any vendor that uses non-descriptive
-// paths. Fix: check the MediaTypes array in each VirtualMedia resource instead.
-// TODO: replace path sniffing with MediaTypes-based slot selection.
+// Slot discovery accepts a match on either "cd"/"dvd" in the @odata.id path
+// (descriptive-path vendors like iDRAC) or the MediaTypes array (numeric-path
+// vendors like HP iLO, where path sniffing alone would miss the slot).
 type genericProvider struct {
 	host, user, pass string
 }

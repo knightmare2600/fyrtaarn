@@ -146,6 +146,13 @@ type App struct {
 	resultsOffset  int
 	lastExportPath string
 
+	// isoServerStop closes the local HTTP server started to serve a
+	// locally-mounted ISO to the BMC (see redfish.ServeLocalISO), if one is
+	// running. Some BMCs stream the image for as long as it stays mounted
+	// rather than copying it once, so this stays open across the whole
+	// mount — only stopped on eject, a replacement mount, or app exit.
+	isoServerStop func()
+
 	currentScreen screen
 
 	menuBar         MenuBar
@@ -395,14 +402,14 @@ func listenScanProgress(ch <-chan scanProgressMsg) tea.Cmd {
 	}
 }
 
-func runVMAction(host, isoURL, user, pass, action string) tea.Cmd {
+func runVMAction(host, isoURL, user, pass, manufacturer, action string) tea.Cmd {
 	return func() tea.Msg {
 		var err error
 		switch action {
 		case "mount":
-			err = redfish.InsertMedia(host, isoURL, user, pass)
+			err = redfish.InsertMedia(host, isoURL, user, pass, manufacturer)
 		case "eject":
-			err = redfish.EjectMedia(host, user, pass)
+			err = redfish.EjectMedia(host, user, pass, manufacturer)
 		}
 		return vmMsg{Action: action, Err: err}
 	}
@@ -1244,9 +1251,9 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 	case "vm-mount":
 		dlg := a.activeDialog
 		a.activeDialog = nil
-		isoURL := dlg.InputValue(0)
-		if isoURL == "" {
-			a.status = "ISO URL required"
+		input := strings.TrimSpace(dlg.InputValue(0))
+		if input == "" {
+			a.status = "ISO URL or local file path required"
 			return a, nil
 		}
 		if len(a.results) == 0 {
@@ -1257,9 +1264,40 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 			a.status = "Virtual media requires Redfish — host does not advertise it"
 			return a, nil
 		}
+
+		// A previous local server is done once a new mount replaces it,
+		// whether the new one is local-served or a plain URL.
+		if a.isoServerStop != nil {
+			a.isoServerStop()
+			a.isoServerStop = nil
+		}
+
+		isoURL := input
+		if !strings.HasPrefix(input, "http://") && !strings.HasPrefix(input, "https://") {
+			// Not a URL — treat as a local ISO path and serve it ourselves.
+			// Redfish InsertMedia only ever fetches from a URL; the BMC has
+			// no endpoint that accepts a direct upload from this tool.
+			path := input
+			if strings.HasPrefix(path, "~/") {
+				if home, err := os.UserHomeDir(); err == nil {
+					path = home + path[1:]
+				}
+			}
+			url, stop, err := redfish.ServeLocalISO(path, host.IP)
+			if err != nil {
+				a.status = "Local ISO error: " + err.Error()
+				return a, nil
+			}
+			a.isoServerStop = stop
+			isoURL = url
+			a.logf("Serving local ISO %s to %s as %s", path, host.IP, url)
+			a.status = fmt.Sprintf("Mounting %s (served locally) on %s", path, host.IP)
+		} else {
+			a.status = fmt.Sprintf("Mounting %s on %s", isoURL, host.IP)
+		}
+
 		a.ipmiLoading = true
-		a.status = fmt.Sprintf("Mounting %s on %s", isoURL, host.IP)
-		return a, tea.Batch(a.spinner.Tick, runVMAction(host.IP, isoURL, a.username, a.password, "mount"))
+		return a, tea.Batch(a.spinner.Tick, runVMAction(host.IP, isoURL, a.username, a.password, host.RedfishManufacturer, "mount"))
 
 	case "vm-eject":
 		a.activeDialog = nil
@@ -1271,9 +1309,13 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 			a.status = "Virtual media requires Redfish — host does not advertise it"
 			return a, nil
 		}
+		if a.isoServerStop != nil {
+			a.isoServerStop()
+			a.isoServerStop = nil
+		}
 		a.ipmiLoading = true
 		a.status = "Ejecting virtual media from " + host.IP
-		return a, tea.Batch(a.spinner.Tick, runVMAction(host.IP, "", a.username, a.password, "eject"))
+		return a, tea.Batch(a.spinner.Tick, runVMAction(host.IP, "", a.username, a.password, host.RedfishManufacturer, "eject"))
 
 	case "user-enable":
 		a.activeDialog = nil
@@ -1500,8 +1542,9 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 
 /* ---------------- HELPERS ---------------- */
 
-// quit tears down any live SOL session, closes the session log (if open)
-// and returns tea.Quit.
+// quit tears down any live SOL session, closes the session log (if open),
+// stops any local ISO server still serving a mounted image, and returns
+// tea.Quit.
 func (a *App) quit() tea.Cmd {
 	// Safety net: tear down a live SOL session synchronously so ipmitool
 	// doesn't outlive the app holding the BMC's SOL slot.
@@ -1512,6 +1555,10 @@ func (a *App) quit() tea.Cmd {
 			_ = ipmi.SOLDeactivate(host, a.username, a.password)
 		}
 		a.solPane = nil
+	}
+	if a.isoServerStop != nil {
+		a.isoServerStop()
+		a.isoServerStop = nil
 	}
 	if a.sessionLog != nil {
 		a.logf("Fyrtaarn exited.")
@@ -2125,7 +2172,7 @@ func (a *App) View() string {
 	case a.ipmiLoading:
 		left = a.spinner.View() + " Querying BMC..."
 	case misc.GlobalEgg.Active:
-		rw := len([]rune(right)) + 2
+		rw := lipgloss.Width(right) + 2
 		maxScroll := a.width - rw
 		if maxScroll < 10 {
 			maxScroll = 10
@@ -2336,7 +2383,7 @@ func (a *App) screenStatusHint() string {
 		return hint
 
 	case screenMCInfo:
-		return "[S] Sensors  [L] Log  [F] FRU  [U] Users  [C] Compliance  [R] Redfish  [P] Power  [O] SOL  [V] VM  [ESC] Back"
+		return "[S] Sensors  [L] Log  [F] FRU  [U] Users  [C] Compliance  [R] Redfish  [P] Power  [O] SOL  [V] Virtual Media  [ESC] Back"
 
 	case screenSensor:
 		total := len(a.sensors)

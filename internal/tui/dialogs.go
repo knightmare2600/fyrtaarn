@@ -76,15 +76,19 @@ func NewScanDialog(cidr string, isRoot bool, lastPorts string) *Dialog {
 // NewVirtualMediaDialog creates the virtual media mount dialog.
 func NewVirtualMediaDialog() *Dialog {
 	inp := textinput.New()
-	inp.Placeholder = "http://fileserver/image.iso"
+	inp.Placeholder = "http://fileserver/image.iso  or  ~/isos/image.iso"
 	inp.Width = 50
 	inp.Focus()
 
 	return &Dialog{
-		Title:       "Virtual Media",
-		Body:        "Mount or eject a virtual ISO image via Redfish.\nHost must support Redfish VirtualMedia.",
+		Title: "Virtual Media",
+		Body: "Mount or eject a virtual ISO image via Redfish.\n" +
+			"Enter an HTTP(S) URL, or a local file path — a local\n" +
+			"path is served to the BMC automatically from this\n" +
+			"machine for as long as the image stays mounted.\n" +
+			"Host must support Redfish VirtualMedia.",
 		inputs:      []textinput.Model{inp},
-		inputLabels: []string{"ISO URL"},
+		inputLabels: []string{"ISO URL / Local Path"},
 		buttons: []DialogButton{
 			{Label: "Mount", Action: "vm-mount"},
 			{Label: "Eject", Action: "vm-eject"},
