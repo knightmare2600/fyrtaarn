@@ -1,0 +1,13 @@
+# Keeps GitHub Actions up to date. publish.yml and release.yml pin actions to
+# full commit SHAs (they hold contents: write); Dependabot updates both the SHA
+# and the trailing "# vX.Y.Z" comment, and bumps the major tags elsewhere.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
