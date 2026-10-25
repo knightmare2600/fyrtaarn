@@ -200,8 +200,9 @@ type App struct {
 	redfishOffset int
 
 	solPane       *solPane
-	solGeneration int  // incremented each session; guards stale solDoneMsg
+	solGeneration int  // bumped on session start and close; guards stale SOL messages
 	solAfterPower bool // when true, powerMsg "on" chains into SOL connect
+	solClosing    bool // a session teardown is in flight; no new session until solClosedMsg
 
 	sessionLog *os.File // nil when logging is off
 
@@ -868,6 +869,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// they catch the full boot sequence from BIOS onwards.
 		if msg.Action == "on" && a.solAfterPower {
 			a.solAfterPower = false
+			if a.solClosing {
+				a.status = "Power on sent — previous SOL session still closing, press [O] again shortly"
+				a.currentScreen = screenMCInfo
+				return a, nil
+			}
 			host := a.results[a.selectedHost].IP
 			a.ipmiLoading = true
 			a.loadProgress = Progress{}
@@ -891,7 +897,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			hostIP = a.results[a.selectedHost].IP
 		}
 		a.logf("SOL session started — %s", hostIP)
-		return a, listenSOL(msg.pane.ptmx, a.solGeneration)
+		return a, listenSOL(msg.pane, a.solGeneration)
 
 	case solReadMsg:
 		if msg.Err != nil {
@@ -900,8 +906,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.currentScreen = screenMCInfo
 			return a, nil
 		}
-		if a.solPane == nil {
-			return a, nil // pane was closed — discard stale read
+		if a.solPane == nil || msg.Gen != a.solGeneration {
+			return a, nil // from a closed session — discard, and don't re-arm its reader
 		}
 		if len(msg.Data) > 0 {
 			prevHistory := len(a.solPane.history)
@@ -913,19 +919,33 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		return a, listenSOL(a.solPane.ptmx, a.solGeneration)
+		return a, listenSOL(a.solPane, a.solGeneration)
 
 	case solDoneMsg:
-		if msg.gen != a.solGeneration {
-			return a, nil // stale — from a previous session whose pty was closed
+		if msg.gen != a.solGeneration || a.solPane == nil {
+			return a, nil // stale — from a session already closed with F10
 		}
-		if a.solPane != nil {
-			a.flushSOLLog()
-			a.solPane.close()
-			a.solPane = nil
+		// ipmitool exited on its own. Surface its last line when it failed,
+		// otherwise an activation refusal ("SOL payload already active on
+		// another session") just looks like the console closing instantly.
+		reason := ""
+		if msg.exitErr != nil {
+			reason = a.solPane.lastLine()
 		}
-		a.currentScreen = screenMCInfo
-		a.status = "SOL session ended"
+		cmd := a.closeSOL()
+		if reason != "" {
+			a.status = "SOL ended: " + reason
+			a.logf("SOL ended: %s", reason)
+		}
+		return a, cmd
+
+	case solClosedMsg:
+		a.solClosing = false
+		a.ipmiLoading = false
+		if msg.err != nil {
+			a.status = "SOL closed, but deactivate failed: " + msg.err.Error()
+			a.logf("SOL deactivate failed on %s: %v", msg.host, msg.err)
+		}
 		return a, nil
 
 	case vmMsg:
@@ -1183,6 +1203,10 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 		if len(a.results) == 0 {
 			return a, nil
 		}
+		if a.solClosing {
+			a.status = "Previous SOL session still closing — try again shortly"
+			return a, nil
+		}
 		host := a.results[a.selectedHost].IP
 		a.ipmiLoading = true
 		a.loadProgress = Progress{}
@@ -1194,6 +1218,10 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 	case "power-on-sol":
 		a.activeDialog = nil
 		if len(a.results) == 0 {
+			return a, nil
+		}
+		if a.solClosing {
+			a.status = "Previous SOL session still closing — try again shortly"
 			return a, nil
 		}
 		host := a.results[a.selectedHost].IP
@@ -1472,8 +1500,19 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 
 /* ---------------- HELPERS ---------------- */
 
-// quit closes the session log (if open) and returns tea.Quit.
+// quit tears down any live SOL session, closes the session log (if open)
+// and returns tea.Quit.
 func (a *App) quit() tea.Cmd {
+	// Safety net: tear down a live SOL session synchronously so ipmitool
+	// doesn't outlive the app holding the BMC's SOL slot.
+	if a.solPane != nil {
+		a.flushSOLLog()
+		host := a.solHostIP()
+		if a.solPane.shutdown() && host != "" {
+			_ = ipmi.SOLDeactivate(host, a.username, a.password)
+		}
+		a.solPane = nil
+	}
 	if a.sessionLog != nil {
 		a.logf("Fyrtaarn exited.")
 		_ = a.sessionLog.Close()
@@ -1504,6 +1543,31 @@ func (a *App) flushSOLLog() {
 		hostIP = a.results[a.selectedHost].IP
 	}
 	a.logf("SOL session ended — %s", hostIP)
+}
+
+// solHostIP returns the IP of the host the SOL session belongs to, or "".
+func (a *App) solHostIP() string {
+	if len(a.results) > 0 && a.selectedHost >= 0 {
+		return a.results[a.selectedHost].IP
+	}
+	return ""
+}
+
+// closeSOL detaches the current pane from the UI and starts its teardown.
+// The generation bump makes any read still in flight on the old pty stale.
+// ipmiLoading (spinner, keys ignored) and solClosing stay set until
+// solClosedMsg, so a reconnect cannot race the teardown's own "sol
+// deactivate" and have it kill the new session's payload.
+func (a *App) closeSOL() tea.Cmd {
+	pane := a.solPane
+	a.flushSOLLog()
+	a.solPane = nil
+	a.solGeneration++
+	a.solClosing = true
+	a.ipmiLoading = true
+	a.currentScreen = screenMCInfo
+	a.status = "SOL session ended"
+	return tea.Batch(a.spinner.Tick, shutdownSOL(pane, a.solHostIP(), a.username, a.password))
 }
 
 /* ---------------- RESULTS ---------------- */
@@ -1864,12 +1928,7 @@ func (a *App) updateSOL(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "f10":
-		a.flushSOLLog()
-		a.solPane.close()
-		a.solPane = nil
-		a.currentScreen = screenMCInfo
-		a.status = "SOL session ended"
-		return a, nil
+		return a, a.closeSOL()
 
 	case "pgup", "shift+up":
 		a.solPane.scrollUp += half
@@ -2061,6 +2120,8 @@ func (a *App) View() string {
 		} else {
 			left = a.spinner.View() + " Scanning..."
 		}
+	case a.solClosing:
+		left = a.spinner.View() + " Closing SOL session..."
 	case a.ipmiLoading:
 		left = a.spinner.View() + " Querying BMC..."
 	case misc.GlobalEgg.Active:

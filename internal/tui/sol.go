@@ -2,8 +2,13 @@ package tui
 
 import (
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"runtime"
+	"strings"
+	"syscall"
+	"time"
 	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -17,15 +22,29 @@ type solPaneReadyMsg struct {
 	pane *solPane
 }
 
+// solReadMsg carries one pty read. Gen identifies the session it came from
+// so a read still in flight from a closed session is discarded instead of
+// being fed into (and starting a second reader on) a newer session's pane.
 type solReadMsg struct {
 	Data []byte
 	Err  error
+	Gen  int
 }
 
-// solDoneMsg carries the session generation so stale messages from a previous
-// session (whose pty was closed) are ignored if the user has already reconnected.
+// solDoneMsg reports that the pty reached EOF because ipmitool exited on its
+// own (BMC closed the session, activation refused, keepalive lost). gen
+// guards against messages from a session the user already closed; exitErr
+// is ipmitool's exit status.
 type solDoneMsg struct {
-	gen int
+	gen     int
+	exitErr error
+}
+
+// solClosedMsg reports that a session's teardown (see solPane.shutdown) has
+// finished: ipmitool has exited, been reaped, and the pty is closed.
+type solClosedMsg struct {
+	host string
+	err  error // non-nil only if the fallback "sol deactivate" failed
 }
 
 /* ---------------- CONSTANTS ---------------- */
@@ -43,6 +62,14 @@ const (
 	stateSSThree = 5 // after ESC O — SS3: app cursor keys (A-D) and F1-F4 (P-S)
 )
 
+// Teardown timeouts for each step of solPane.shutdown. Variables rather than
+// constants so tests can shorten them.
+var (
+	solEscapeWait = 3 * time.Second // ipmitool deactivates + closes session itself
+	solSigintWait = 5 * time.Second // SIGINT handler sends Close Session (one retry)
+	solKillWait   = 2 * time.Second // per SIGTERM / SIGKILL step
+)
+
 /* ---------------- PANE ---------------- */
 
 // solPane is a VT100-compatible screen buffer. It maintains a cols×rows grid
@@ -52,6 +79,18 @@ type solPane struct {
 	ptmx *os.File
 	cols int
 	rows int
+
+	// cmd is the ipmitool process; exited is closed once cmd.Wait() returns,
+	// after exitErr has been set.
+	cmd     *exec.Cmd
+	exited  chan struct{}
+	exitErr error
+
+	// lastSentCR tracks whether the last byte written to ipmitool was CR/LF
+	// (or nothing has been written). ipmitool only honours its escape
+	// character at the start of a line, so shutdown can only use the clean
+	// escape + '.' exit when this is true.
+	lastSentCR bool
 
 	// Screen grid: grid[row][col], space-filled.
 	grid   [][]rune
@@ -99,7 +138,29 @@ func newSolPane(ptmx *os.File, cols, rows int) *solPane {
 		grid:         makeGrid(rows, cols),
 		scrollBottom: rows - 1,
 		csiParams:    make([]int, 0, 8),
+		lastSentCR:   true,
 	}
+}
+
+// startSolProcess runs cmd inside a pty and returns a pane that owns both.
+// A goroutine reaps the process so it never lingers as a zombie and so
+// shutdown and listenSOL can tell when it has gone.
+func startSolProcess(cmd *exec.Cmd, cols, rows int) (*solPane, error) {
+	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
+		Rows: uint16(max(rows, solDefaultRows)),
+		Cols: uint16(max(cols, solDefaultCols)),
+	})
+	if err != nil {
+		return nil, err
+	}
+	p := newSolPane(ptmx, cols, rows)
+	p.cmd = cmd
+	p.exited = make(chan struct{})
+	go func() {
+		p.exitErr = cmd.Wait()
+		close(p.exited)
+	}()
+	return p, nil
 }
 
 func makeGrid(rows, cols int) [][]rune {
@@ -132,14 +193,97 @@ func (s *solPane) resize(cols, rows int) {
 	s.scrollBottom = min(s.scrollBottom, rows-1)
 }
 
-func (s *solPane) close() {
-	_ = s.ptmx.Close()
-}
-
 func (s *solPane) write(b []byte) {
+	if len(b) == 0 {
+		return
+	}
 	_, _ = s.ptmx.Write(b)
+	last := b[len(b)-1]
+	s.lastSentCR = last == '\r' || last == '\n'
 }
 
+// waitExit reports whether ipmitool has exited within d.
+func (s *solPane) waitExit(d time.Duration) bool {
+	select {
+	case <-s.exited:
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+
+// shutdown ends the ipmitool process and only then closes the pty.
+//
+// Closing the pty first does nothing: pty.Open calls Fd(), which leaves the
+// master in blocking mode, and Go's os.File.Close on a blocking fd defers the
+// real close(2) until the in-flight Read in listenSOL returns. On an idle
+// console that never happens, so ipmitool kept running — and kept the BMC's
+// single SOL slot alive with its keepalives — after F10.
+//
+// Escalation: escape + '.' (ipmitool deactivates the payload and closes its
+// session; only valid at the start of a line), then SIGINT (ipmitool's
+// handler sends Close Session), then SIGTERM, then SIGKILL. Returns true if
+// a signal was needed, meaning the payload may still be marked active and
+// the caller is to send an explicit "sol deactivate". A process that had
+// already exited on its own returns false — there is nothing of ours left
+// to release.
+func (s *solPane) shutdown() (needDeactivate bool) {
+	select {
+	case <-s.exited:
+		_ = s.ptmx.Close()
+		return false
+	default:
+	}
+
+	// Nothing reads the pty once the pane is detached from the UI. Drain it
+	// so ipmitool cannot block writing console output (or its own exit
+	// messages) into a full pty buffer while we wait for it to exit. The
+	// copy ends with EIO once ipmitool has gone.
+	go func() { _, _ = io.Copy(io.Discard, s.ptmx) }()
+
+	if s.lastSentCR {
+		s.write([]byte{ipmi.SOLEscapeChar, '.'})
+		if s.waitExit(solEscapeWait) {
+			_ = s.ptmx.Close()
+			return s.exitErr != nil
+		}
+	}
+
+	needDeactivate = true
+	steps := []struct {
+		sig  syscall.Signal
+		wait time.Duration
+	}{
+		{syscall.SIGINT, solSigintWait},
+		{syscall.SIGTERM, solKillWait},
+		{syscall.SIGKILL, solKillWait},
+	}
+	for _, st := range steps {
+		_ = s.cmd.Process.Signal(st.sig)
+		if s.waitExit(st.wait) {
+			break
+		}
+	}
+	_ = s.ptmx.Close()
+	return needDeactivate
+}
+
+// lastLine returns the last non-blank line of output (screen, then
+// history). When ipmitool exits on its own this is its reason, e.g.
+// "Info: SOL payload already active on another session".
+func (s *solPane) lastLine() string {
+	for r := s.rows - 1; r >= 0; r-- {
+		if line := strings.TrimSpace(rowToString(s.grid[r])); line != "" {
+			return line
+		}
+	}
+	for i := len(s.history) - 1; i >= 0; i-- {
+		if line := strings.TrimSpace(s.history[i]); line != "" {
+			return line
+		}
+	}
+	return ""
+}
 
 /* ---------------- VT100 PARSER ---------------- */
 
@@ -568,33 +712,59 @@ func startSOLPane(host, user, pass string, cols, rows int) tea.Cmd {
 		if runtime.GOOS == "windows" {
 			return solReadMsg{Err: fmt.Errorf("built-in SOL pane not supported on Windows")}
 		}
-		cmd := ipmi.SOLCmd(host, user, pass)
-		ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
-			Rows: uint16(max(rows, solDefaultRows)),
-			Cols: uint16(max(cols, solDefaultCols)),
-		})
+		// Best-effort: clear any SOL payload the BMC still thinks is active
+		// from a previous session that didn't end cleanly (app killed,
+		// terminal closed, network drop — none of which give the app a
+		// chance to run its own F10/quit deactivate logic). Most BMCs allow
+		// only one SOL session at a time, so a stuck slot makes every
+		// subsequent "sol activate" silently fail even though the chassis
+		// itself is powered on and reachable. Error is ignored: if nothing
+		// was actually active this just fails fast, and a real connectivity
+		// problem will surface again on the activate attempt below.
+		_ = ipmi.SOLDeactivate(host, user, pass)
+
+		p, err := startSolProcess(ipmi.SOLCmd(host, user, pass), cols, rows)
 		if err != nil {
 			return solReadMsg{Err: err}
 		}
-		return solPaneReadyMsg{pane: newSolPane(ptmx, cols, rows)}
+		return solPaneReadyMsg{pane: p}
+	}
+}
+
+// shutdownSOL tears a session down off the UI goroutine (see
+// solPane.shutdown) and, if ipmitool had to be signalled, sends an explicit
+// "sol deactivate" so the BMC frees its SOL slot.
+func shutdownSOL(p *solPane, host, user, pass string) tea.Cmd {
+	return func() tea.Msg {
+		var err error
+		if p.shutdown() && host != "" {
+			err = ipmi.SOLDeactivate(host, user, pass)
+		}
+		return solClosedMsg{host: host, err: err}
 	}
 }
 
 // listenSOL blocks on one pty read and returns the result as a tea.Msg.
-// gen identifies the session so stale done messages are discarded on reconnect.
-func listenSOL(ptmx *os.File, gen int) tea.Cmd {
+// gen identifies the session so stale messages are discarded on reconnect.
+// EOF/EIO means ipmitool has exited (it holds the only slave fds), so wait
+// briefly for the reaper to record its exit status.
+func listenSOL(p *solPane, gen int) tea.Cmd {
 	return func() tea.Msg {
 		buf := make([]byte, 4096)
-		n, err := ptmx.Read(buf)
+		n, err := p.ptmx.Read(buf)
 		if n > 0 {
 			data := make([]byte, n)
 			copy(data, buf[:n])
-			return solReadMsg{Data: data}
+			return solReadMsg{Data: data, Gen: gen}
 		}
 		if err != nil {
-			return solDoneMsg{gen: gen}
+			var exitErr error
+			if p.waitExit(solKillWait) {
+				exitErr = p.exitErr
+			}
+			return solDoneMsg{gen: gen, exitErr: exitErr}
 		}
-		return solReadMsg{} // zero-byte read — retry
+		return solReadMsg{Gen: gen} // zero-byte read — retry
 	}
 }
 

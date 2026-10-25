@@ -127,9 +127,28 @@ func PowerSoft(host, user, pass string) error {
 	return err
 }
 
+// SOLEscapeChar is the ipmitool SOL escape character fyrtaarn starts
+// sessions with (-e). Ctrl+] cannot be produced by the TUI's key mapping, so
+// a user typing ipmitool's default "~." at the start of a line no longer
+// kills the session by accident, and the TUI can still send escape + '.'
+// itself to ask ipmitool for a clean exit.
+const SOLEscapeChar byte = 0x1d
+
+// SOLDeactivate tells the BMC to tear down the active SOL payload (instance
+// 1), whichever session holds it. Most BMCs allow only one SOL session at a
+// time. ipmitool only deactivates the payload itself when it exits via the
+// escape sequence or loses stdin; killed by a signal it leaves the payload
+// marked active, and every following "sol activate" then fails with "SOL
+// payload already active on another session".
+func SOLDeactivate(host, user, pass string) error {
+	_, err := runIPMICommand(host, user, pass, ipmiShortTimeout, "sol", "deactivate")
+	return err
+}
+
 // SOLCmd returns an *exec.Cmd that activates a Serial-over-LAN session.
-// Run it via tea.ExecProcess so the TUI suspends and hands the terminal to
-// ipmitool. The user disconnects with the ipmitool escape sequence (~.).
+// The TUI runs it inside a pty (see solPane) and renders its output itself;
+// the user disconnects with F10, which ends ipmitool via its escape sequence
+// or SIGINT (see solPane.shutdown) so the BMC-side session is released.
 // Credentials appear in the process argument list — this is an ipmitool
 // limitation shared by all other commands in this package.
 func SOLCmd(host, user, pass string) *exec.Cmd {
@@ -138,6 +157,7 @@ func SOLCmd(host, user, pass string) *exec.Cmd {
 		"-H", host,
 		"-U", user,
 		"-P", pass,
+		"-e", string([]byte{SOLEscapeChar}),
 		"sol", "activate",
 	)
 }
