@@ -15,12 +15,12 @@ package redfish
 //     may have trailing whitespace — str() trims these.
 //   - MemorySummary.Status uses "HealthRollUp" (capital U) not "HealthRollup".
 //   - VirtualMedia: two numeric slots under /redfish/v1/Managers/1/VirtualMedia/
-//       Slot 1: MediaTypes = ["Floppy", "USBStick"]
-//       Slot 2: MediaTypes = ["CD", "DVD"]  ← the ISO mount target
+//     — slot 1 has MediaTypes ["Floppy", "USBStick"]; slot 2 has MediaTypes
+//     ["CD", "DVD"] and is the ISO mount target.
 //   - VirtualMedia actions are NOT at the standard Actions map. They are under
-//     Oem.Hp.Actions with HP-specific names:
-//       #HpiLOVirtualMedia.InsertVirtualMedia → target URL
-//       #HpiLOVirtualMedia.EjectVirtualMedia  → target URL
+//     Oem.Hp.Actions with HP-specific names, each holding a target URL:
+//     #HpiLOVirtualMedia.InsertVirtualMedia and
+//     #HpiLOVirtualMedia.EjectVirtualMedia.
 //     Insert body: {"Image": "http://...iso"} — Intent and Signature are
 //     optional; Inserted/WriteProtected are not accepted by the HP OEM endpoint.
 //   - Auth: HTTP Basic Auth works. Session-token auth not required on iLO 4.
