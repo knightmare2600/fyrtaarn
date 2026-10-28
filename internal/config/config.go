@@ -14,9 +14,11 @@ type RecentConnection struct {
 	Username string `json:"username,omitempty"`
 }
 
-// Favourite is one user-pinned host shown under File > Favourites. Only IP
-// and username are persisted — passwords are never written to disk.
+// Favourite is one user-pinned host shown under File > Favourites. Only the
+// display name, IP and username are persisted — passwords are never written
+// to disk. Name is optional; entries saved before it existed have none.
 type Favourite struct {
+	Name     string `json:"name,omitempty"`
 	IP       string `json:"ip"`
 	Username string `json:"username,omitempty"`
 }

@@ -367,19 +367,23 @@ func (d *Dialog) syncFocus() tea.Cmd {
 // result on the screen. All dialogs and the about box route through this so
 // the modal chrome is consistent across the application.
 func renderModal(title, body string, screenW, screenH int) string {
-	boxed := BorderStyle().Render(body)
+	titleStr := " " + title + " "
+	titleW := lipgloss.Width(titleStr)
+
+	// Widen the box if the title (plus a corner and at least one dash each
+	// side) would not fit in its top border.
+	st := BorderStyle()
+	boxed := st.Render(body)
+	if minW := titleW + 4; title != "" && lipgloss.Width(boxed) < minW {
+		boxed = st.Width(minW - 2).Render(body) // Width excludes the border
+	}
 
 	lines := strings.Split(boxed, "\n")
 
 	// Inject the title into the top border line (╭── Title ──╮).
 	if len(lines) > 0 && title != "" {
 		topW := lipgloss.Width(lines[0])
-		titleStr := " " + title + " "
-		titleW := lipgloss.Width(titleStr)
 		dashTotal := topW - 2 - titleW // -2 for ╭ and ╮
-		if dashTotal < 2 {
-			dashTotal = 2
-		}
 		left := dashTotal / 2
 		right := dashTotal - left
 
@@ -393,16 +397,21 @@ func renderModal(title, body string, screenW, screenH int) string {
 			borderSt.Render(strings.Repeat("─", right)+"╮")
 	}
 
-	// Drop shadow: single column to the right and one row below.
+	// Drop shadow: single column to the right and one row below, offset by
+	// one. Every line is padded to the same width (boxW+1): lipgloss.Place
+	// centres each line on its own width, so a shorter top line would be
+	// pushed one column right of the box sides.
 	shadowSt := lipgloss.NewStyle().Foreground(lipgloss.Color("236"))
+	padSt := lipgloss.NewStyle().Background(lipgloss.Color(CurrentTheme.Background))
 	boxW := 0
 	if len(lines) > 0 {
 		boxW = lipgloss.Width(lines[0])
+		lines[0] += padSt.Render(" ")
 	}
 	for i := 1; i < len(lines); i++ {
 		lines[i] += shadowSt.Render("▓")
 	}
-	lines = append(lines, "  "+shadowSt.Render(strings.Repeat("▓", boxW)))
+	lines = append(lines, padSt.Render(" ")+shadowSt.Render(strings.Repeat("▓", boxW)))
 
 	modal := strings.Join(lines, "\n")
 

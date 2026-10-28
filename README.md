@@ -449,6 +449,11 @@ For detailed technical writeups and excellent explanations of:
 
 ## Changelog
 
+### 0.6.4
+
+- **Favourites: name field** — favourites now have an optional display name (up to 32 characters), entered first in the add/edit form and shown as `Name — IP (user)` in both File > Favourites and the Manage Favourites dialog. Saved as `"name"` in `config.json`; existing entries without one load unchanged and display as before
+- **Modal border alignment** — the top border of modal windows (Connect to BMC, Open SOL, and every other dialog) was drawn one column to the right of the side borders. `lipgloss.Place` centres each line on its own width, and the top border line (no shadow cell) was one column narrower than the body lines and two narrower than the bottom shadow row, so it got different padding. Every line is now padded to the same width. Also fixed: a title wider than the dialog body produced a top border wider than the box; the box is now widened to fit the title
+
 ### 0.6.3
 
 - **Virtual media: local ISO** — the `[V]` dialog accepts a local file path as well as a URL; Redfish `InsertMedia` only ever fetches from a URL, so a local image is served from an HTTP server on this machine at a random path, bound to whichever local address routes to the BMC, and kept running for as long as the media stays mounted (some BMCs stream the image rather than copying it once); stopped on eject, on mounting another image, or on app exit

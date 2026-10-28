@@ -24,11 +24,36 @@ type FavouritesDialog struct {
 
 	editing   bool // true while the add/edit sub-form is shown
 	editIdx   int  // index being edited; -1 while adding a new entry
+	nameInput textinput.Model
 	ipInput   textinput.Model
 	userInput textinput.Model
-	formFocus int // 0=ip, 1=username, 2=save, 3=cancel
+	formFocus int // see favFocus* constants
 
 	notice string // transient inline warning, e.g. "Favourites full (15 max)"
+}
+
+// Add/edit form focus order.
+const (
+	favFocusName = iota
+	favFocusIP
+	favFocusUser
+	favFocusSave
+	favFocusCancel
+	favFocusCount
+)
+
+// favouriteLabel is how a favourite is shown in both the File > Favourites
+// menu and the management dialog: "Name — IP (user)", omitting the parts
+// that are empty.
+func favouriteLabel(fav config.Favourite) string {
+	label := fav.IP
+	if fav.Name != "" {
+		label = fav.Name + " — " + fav.IP
+	}
+	if fav.Username != "" {
+		label += " (" + fav.Username + ")"
+	}
+	return label
 }
 
 func NewFavouritesDialog(items []config.Favourite) *FavouritesDialog {
@@ -42,6 +67,11 @@ func (f *FavouritesDialog) startForm(idx int) {
 	f.editIdx = idx
 	f.notice = ""
 
+	name := textinput.New()
+	name.Placeholder = "web-01 iLO"
+	name.Width = 25
+	name.CharLimit = 32
+
 	ip := textinput.New()
 	ip.Placeholder = "192.168.1.100"
 	ip.Width = 25
@@ -51,14 +81,16 @@ func (f *FavouritesDialog) startForm(idx int) {
 	user.Width = 20
 
 	if idx >= 0 && idx < len(f.items) {
+		name.SetValue(f.items[idx].Name)
 		ip.SetValue(f.items[idx].IP)
 		user.SetValue(f.items[idx].Username)
 	}
-	ip.Focus()
+	name.Focus()
 
+	f.nameInput = name
 	f.ipInput = ip
 	f.userInput = user
-	f.formFocus = 0
+	f.formFocus = favFocusName
 }
 
 // HintText returns the status-bar hint line for the dialog's current mode.
@@ -130,59 +162,64 @@ func (f *FavouritesDialog) updateForm(msg tea.KeyMsg) (changed, closed bool, cmd
 		return false, false, nil
 
 	case "tab", "down":
-		f.formFocus = (f.formFocus + 1) % 4
+		f.formFocus = (f.formFocus + 1) % favFocusCount
 		return false, false, f.syncFormFocus()
 
 	case "shift+tab", "up":
-		f.formFocus = (f.formFocus - 1 + 4) % 4
+		f.formFocus = (f.formFocus - 1 + favFocusCount) % favFocusCount
 		return false, false, f.syncFormFocus()
 
 	case "enter":
 		switch f.formFocus {
-		case 2: // Save
+		case favFocusSave:
 			return f.commitForm()
-		case 3: // Cancel
+		case favFocusCancel:
 			f.editing = false
 			return false, false, nil
 		default:
-			f.formFocus = (f.formFocus + 1) % 4
+			f.formFocus = (f.formFocus + 1) % favFocusCount
 			return false, false, f.syncFormFocus()
 		}
 	}
 
 	var c tea.Cmd
 	switch f.formFocus {
-	case 0:
+	case favFocusName:
+		f.nameInput, c = f.nameInput.Update(msg)
+	case favFocusIP:
 		f.ipInput, c = f.ipInput.Update(msg)
-	case 1:
+	case favFocusUser:
 		f.userInput, c = f.userInput.Update(msg)
 	}
 	return false, false, c
 }
 
 func (f *FavouritesDialog) syncFormFocus() tea.Cmd {
-	if f.formFocus == 0 {
-		f.ipInput.Focus()
-		f.userInput.Blur()
-		return textinput.Blink
-	}
+	f.nameInput.Blur()
 	f.ipInput.Blur()
-	if f.formFocus == 1 {
-		f.userInput.Focus()
-		return textinput.Blink
-	}
 	f.userInput.Blur()
-	return nil
+	switch f.formFocus {
+	case favFocusName:
+		f.nameInput.Focus()
+	case favFocusIP:
+		f.ipInput.Focus()
+	case favFocusUser:
+		f.userInput.Focus()
+	default:
+		return nil
+	}
+	return textinput.Blink
 }
 
 func (f *FavouritesDialog) commitForm() (changed, closed bool, cmd tea.Cmd) {
+	name := strings.TrimSpace(f.nameInput.Value())
 	ip := strings.TrimSpace(f.ipInput.Value())
 	user := strings.TrimSpace(f.userInput.Value())
 	if ip == "" {
 		f.notice = "IP address required"
 		return false, false, nil
 	}
-	entry := config.Favourite{IP: ip, Username: user}
+	entry := config.Favourite{Name: name, IP: ip, Username: user}
 	if f.editIdx >= 0 && f.editIdx < len(f.items) {
 		f.items[f.editIdx] = entry
 	} else {
@@ -210,9 +247,11 @@ func (f *FavouritesDialog) Render(w, h int) string {
 			return s.Render(label + ":")
 		}
 
-		b.WriteString(fieldLabel("IP Address", f.formFocus == 0) + "\n")
+		b.WriteString(fieldLabel("Name", f.formFocus == favFocusName) + "\n")
+		b.WriteString(f.nameInput.View() + "\n\n")
+		b.WriteString(fieldLabel("IP Address", f.formFocus == favFocusIP) + "\n")
 		b.WriteString(f.ipInput.View() + "\n\n")
-		b.WriteString(fieldLabel("Username", f.formFocus == 1) + "\n")
+		b.WriteString(fieldLabel("Username", f.formFocus == favFocusUser) + "\n")
 		b.WriteString(f.userInput.View() + "\n\n")
 
 		if f.notice != "" {
@@ -220,8 +259,8 @@ func (f *FavouritesDialog) Render(w, h int) string {
 				Render("⚠ "+f.notice) + "\n\n")
 		}
 
-		b.WriteString(renderButton("Save", f.formFocus == 2, false) + " " +
-			renderButton("Cancel", f.formFocus == 3, false))
+		b.WriteString(renderButton("Save", f.formFocus == favFocusSave, false) + " " +
+			renderButton("Cancel", f.formFocus == favFocusCancel, false))
 
 		return renderModal(title, b.String(), w, h)
 	}
@@ -230,10 +269,7 @@ func (f *FavouritesDialog) Render(w, h int) string {
 		b.WriteString("No favourites yet — press [A] to add one.\n\n")
 	} else {
 		for i, fav := range f.items {
-			line := fmt.Sprintf("%2d. %s", i+1, fav.IP)
-			if fav.Username != "" {
-				line += " (" + fav.Username + ")"
-			}
+			line := fmt.Sprintf("%2d. %s", i+1, favouriteLabel(fav))
 			style := lipgloss.NewStyle().Foreground(lipgloss.Color(CurrentTheme.Foreground))
 			if i == f.cursor {
 				style = lipgloss.NewStyle().

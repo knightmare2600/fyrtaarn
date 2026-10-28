@@ -288,11 +288,7 @@ func (a *App) refreshRecentMenu() {
 func (a *App) refreshFavouritesMenu() {
 	items := make([]SubItem, 0, len(a.favourites))
 	for i, fav := range a.favourites {
-		label := fav.IP
-		if fav.Username != "" {
-			label += " (" + fav.Username + ")"
-		}
-		items = append(items, SubItem{Label: label, Action: fmt.Sprintf("fav-connect:%d", i)})
+		items = append(items, SubItem{Label: favouriteLabel(fav), Action: fmt.Sprintf("fav-connect:%d", i)})
 	}
 	a.menuBar.SetFavourites(items)
 }
