@@ -18,6 +18,12 @@ const maxFavourites = 15
 // editing, and removing entries in place, capped at maxFavourites. Selecting
 // a favourite directly from the File menu (rather than through this dialog)
 // connects to it — this dialog is management-only.
+//
+// Passwords are session-only: never part of config.Favourite, never written
+// to disk. A password entered here is handed back to the App as a favCred
+// (see TakeCreds), which puts it in the in-memory session cache — the same
+// cache connectToHost already checks, so the favourite then connects
+// without prompting for the rest of the run.
 type FavouritesDialog struct {
 	items  []config.Favourite
 	cursor int
@@ -27,9 +33,24 @@ type FavouritesDialog struct {
 	nameInput textinput.Model
 	ipInput   textinput.Model
 	userInput textinput.Model
+	passInput textinput.Model
 	formFocus int // see favFocus* constants
 
+	// cachedPass looks up the session-cached password for an IP, so the edit
+	// form can pre-fill it. May be nil.
+	cachedPass func(ip string) (string, bool)
+	hadPass    bool      // the form's password box was pre-filled from the cache
+	creds      []favCred // pending session-cache updates, drained by TakeCreds
+
 	notice string // transient inline warning, e.g. "Favourites full (15 max)"
+}
+
+// favCred is a session-cache update produced by saving the add/edit form.
+// An empty pass means a pre-filled password box was cleared: drop the
+// cached entry. A box left empty that was never pre-filled queues nothing,
+// so adding a favourite cannot wipe a session the user is logged in with.
+type favCred struct {
+	ip, user, pass string
 }
 
 // Add/edit form focus order.
@@ -37,6 +58,7 @@ const (
 	favFocusName = iota
 	favFocusIP
 	favFocusUser
+	favFocusPass
 	favFocusSave
 	favFocusCancel
 	favFocusCount
@@ -56,10 +78,18 @@ func favouriteLabel(fav config.Favourite) string {
 	return label
 }
 
-func NewFavouritesDialog(items []config.Favourite) *FavouritesDialog {
+func NewFavouritesDialog(items []config.Favourite, cachedPass func(ip string) (string, bool)) *FavouritesDialog {
 	cp := make([]config.Favourite, len(items))
 	copy(cp, items)
-	return &FavouritesDialog{items: cp, editIdx: -1}
+	return &FavouritesDialog{items: cp, editIdx: -1, cachedPass: cachedPass}
+}
+
+// TakeCreds returns and clears the session-cache updates queued by saving
+// the add/edit form.
+func (f *FavouritesDialog) TakeCreds() []favCred {
+	c := f.creds
+	f.creds = nil
+	return c
 }
 
 func (f *FavouritesDialog) startForm(idx int) {
@@ -78,18 +108,32 @@ func (f *FavouritesDialog) startForm(idx int) {
 
 	user := textinput.New()
 	user.Placeholder = "admin"
-	user.Width = 20
+	user.Width = 25
 
+	pass := textinput.New()
+	pass.Placeholder = "optional, this session only"
+	pass.Width = 25
+	pass.EchoMode = textinput.EchoPassword
+	pass.EchoCharacter = '•'
+
+	f.hadPass = false
 	if idx >= 0 && idx < len(f.items) {
 		name.SetValue(f.items[idx].Name)
 		ip.SetValue(f.items[idx].IP)
 		user.SetValue(f.items[idx].Username)
+		if f.cachedPass != nil {
+			if pw, ok := f.cachedPass(f.items[idx].IP); ok {
+				pass.SetValue(pw)
+				f.hadPass = true
+			}
+		}
 	}
 	name.Focus()
 
 	f.nameInput = name
 	f.ipInput = ip
 	f.userInput = user
+	f.passInput = pass
 	f.formFocus = favFocusName
 }
 
@@ -190,6 +234,8 @@ func (f *FavouritesDialog) updateForm(msg tea.KeyMsg) (changed, closed bool, cmd
 		f.ipInput, c = f.ipInput.Update(msg)
 	case favFocusUser:
 		f.userInput, c = f.userInput.Update(msg)
+	case favFocusPass:
+		f.passInput, c = f.passInput.Update(msg)
 	}
 	return false, false, c
 }
@@ -198,6 +244,7 @@ func (f *FavouritesDialog) syncFormFocus() tea.Cmd {
 	f.nameInput.Blur()
 	f.ipInput.Blur()
 	f.userInput.Blur()
+	f.passInput.Blur()
 	switch f.formFocus {
 	case favFocusName:
 		f.nameInput.Focus()
@@ -205,6 +252,8 @@ func (f *FavouritesDialog) syncFormFocus() tea.Cmd {
 		f.ipInput.Focus()
 	case favFocusUser:
 		f.userInput.Focus()
+	case favFocusPass:
+		f.passInput.Focus()
 	default:
 		return nil
 	}
@@ -220,6 +269,9 @@ func (f *FavouritesDialog) commitForm() (changed, closed bool, cmd tea.Cmd) {
 		return false, false, nil
 	}
 	entry := config.Favourite{Name: name, IP: ip, Username: user}
+	if pw := f.passInput.Value(); pw != "" || f.hadPass {
+		f.creds = append(f.creds, favCred{ip: ip, user: user, pass: pw})
+	}
 	if f.editIdx >= 0 && f.editIdx < len(f.items) {
 		f.items[f.editIdx] = entry
 	} else {
@@ -239,20 +291,22 @@ func (f *FavouritesDialog) Render(w, h int) string {
 			title = "Add Favourite"
 		}
 
-		fieldLabel := func(label string, focused bool) string {
+		// Label and input share a row so all four fields fit on a 24-row
+		// terminal; the modal grows wider instead of taller.
+		field := func(label string, focus int, inp textinput.Model) string {
 			s := lipgloss.NewStyle().Foreground(lipgloss.Color(CurrentTheme.Foreground))
-			if focused {
+			if f.formFocus == focus {
 				s = s.Bold(true).Foreground(lipgloss.Color(CurrentTheme.Accent))
 			}
-			return s.Render(label + ":")
+			return s.Render(fmt.Sprintf("%-12s", label+":")) + inp.View() + "\n"
 		}
 
-		b.WriteString(fieldLabel("Name", f.formFocus == favFocusName) + "\n")
-		b.WriteString(f.nameInput.View() + "\n\n")
-		b.WriteString(fieldLabel("IP Address", f.formFocus == favFocusIP) + "\n")
-		b.WriteString(f.ipInput.View() + "\n\n")
-		b.WriteString(fieldLabel("Username", f.formFocus == favFocusUser) + "\n")
-		b.WriteString(f.userInput.View() + "\n\n")
+		b.WriteString(field("Name", favFocusName, f.nameInput))
+		b.WriteString(field("IP Address", favFocusIP, f.ipInput))
+		b.WriteString(field("Username", favFocusUser, f.userInput))
+		b.WriteString(field("Password", favFocusPass, f.passInput))
+		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).
+			Render("Password is kept for this session only, never saved.") + "\n\n")
 
 		if f.notice != "" {
 			b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#CB4B16")).Bold(true).

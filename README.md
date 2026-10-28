@@ -98,7 +98,7 @@ The name reflects the project's purpose: visibility, remote control, and infrast
 ### Architecture
 
 - Provider abstraction interface (groundwork only; vendor implementations pending)
-- Parallel IPMI queries — mc info, lan print, chassis status fetched concurrently
+- One IPMI session per BMC at a time — mc info, lan print and chassis status are fetched sequentially, and every ipmitool call takes a per-host lock; some BMCs (iDRAC9) refuse overlapping session set-ups with "insufficient resources for session"
 - Per-command timeouts — 15 s for single-round-trip commands; 90 s for bulk SDR/SEL reads
 - ipmitool credential string zeroed from memory after each command
 - Structured file logger (`internal/logging`) — level-filtered, RFC3339 timestamps, defaults to discard (opt-in)
@@ -448,6 +448,13 @@ For detailed technical writeups and excellent explanations of:
 ---
 
 ## Changelog
+
+### 0.6.5
+
+- **iDRAC9 connect failure** — connecting fetched `mc info`, `lan print` and `chassis status` in parallel, opening three RMCP+ sessions at once. An iDRAC9 (FW 4.20) accepts one and refuses the others with `insufficient resources for session`; whenever `mc info` was refused the connect failed and the host was left on the results tree as `vendor: Direct`. The three are now fetched sequentially (`mc info` first, so a bad password still fails fast), and `runIPMICommand` takes a per-host lock so no code path can open overlapping sessions to one BMC. The command timeout starts once the lock is held
+- **Direct connect: vendor and Redfish** — hosts added via File > Connect to BMC, Recent Connections or Favourites were given a placeholder vendor of `Direct` and never probed, so the tree showed `vendor: Direct` and `HasRedfish` stayed false, which also blocked Redfish-gated actions such as `[V]` virtual media on directly connected hosts. A newly added direct host now gets the same enrichment a scan runs (reverse DNS and the Redfish probe), and the placeholder is replaced by the Redfish manufacturer or, failing that, the `mc info` manufacturer name. The two duplicated add-host code paths are now one helper
+- **Favourites: password box** — the add/edit form has a masked Password field. It is session-only: it goes into the in-memory (XOR-obfuscated) session cache, never into `config.json`, so the favourite connects without prompting for the rest of the run. Editing pre-fills it from the cache; clearing it drops the cached entry; leaving it empty when adding a favourite leaves any live session untouched
+- **Favourites: compact form** — labels and inputs share a row, so the four-field form fits an 80×24 terminal (12 rows instead of 17)
 
 ### 0.6.4
 

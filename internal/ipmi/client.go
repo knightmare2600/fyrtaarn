@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -17,6 +18,23 @@ const (
 	ipmiLongTimeout = 90 * time.Second
 )
 
+// hostLocks serialises ipmitool invocations per BMC (host -> *sync.Mutex).
+// BMCs have small RMCP+ session tables and some refuse overlapping session
+// set-ups outright: an iDRAC9 (FW 4.20) given mc info, lan print and chassis
+// status at once accepted one and answered the other two with "insufficient
+// resources for session". One session at a time per host is the only
+// ordering every BMC accepts.
+var hostLocks sync.Map
+
+// lockHost blocks until no other ipmitool command is running against host
+// and returns the unlock function.
+func lockHost(host string) func() {
+	m, _ := hostLocks.LoadOrStore(host, &sync.Mutex{})
+	mu := m.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
+
 func runIPMICommand(
 	host string,
 	user string,
@@ -26,6 +44,10 @@ func runIPMICommand(
 ) (string, error) {
 
 	defer wipeString(&pass)
+
+	// Take the host lock before starting the timeout, so time spent queued
+	// behind another command does not count against this one.
+	defer lockHost(host)()
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()

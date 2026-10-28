@@ -5,7 +5,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -324,23 +323,8 @@ func (a *App) connectToHost(ip, username string) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
-	targetIdx := -1
-	for i, r := range a.results {
-		if r.IP == ip {
-			targetIdx = i
-			break
-		}
-	}
-	if targetIdx < 0 {
-		a.results = append(a.results, discovery.HostResult{
-			IP:         ip,
-			IsBMC:      true,
-			Confidence: 100,
-			Vendor:     "Direct",
-		})
-		targetIdx = len(a.results) - 1
-	}
-	a.selectedHost = targetIdx
+	idx, enrich := a.addDirectHost(ip)
+	a.selectedHost = idx
 	a.currentScreen = screenResults
 
 	if user, pass, ok := a.sessionCache.Get(ip); ok {
@@ -348,11 +332,60 @@ func (a *App) connectToHost(ip, username string) (tea.Model, tea.Cmd) {
 		a.password = pass
 		a.ipmiLoading = true
 		a.status = "Reconnecting to " + ip
-		return a, tea.Batch(a.spinner.Tick, runMCInfo(ip, user, pass))
+		return a, tea.Batch(a.spinner.Tick, runMCInfo(ip, user, pass), enrich)
 	}
 
 	a.activeDialog = NewConnectBMCDialog(ip, username)
-	return a, textinput.Blink
+	return a, tea.Batch(textinput.Blink, enrich)
+}
+
+// directVendor is the placeholder Vendor for a host added without a scan,
+// until enrichment or "mc info" supplies a real one.
+const directVendor = "Direct"
+
+// directHostEnrichedMsg carries the scan-style enrichment (reverse DNS,
+// Redfish probe) for a host added via direct connect.
+type directHostEnrichedMsg struct {
+	host discovery.HostResult
+}
+
+// addDirectHost returns the results index for ip, adding a placeholder entry
+// if it is not already there. A newly added host has none of the data a
+// scan fills in, so it also returns a command that runs the same enrichment
+// a scan does (discovery.EnrichResults); without it the host keeps the
+// "Direct" placeholder vendor and HasRedfish=false, which also blocks
+// Redfish-gated actions such as virtual media. Hosts already in the results
+// were enriched by their scan, so the command is nil for them.
+func (a *App) addDirectHost(ip string) (int, tea.Cmd) {
+	for i, r := range a.results {
+		if r.IP == ip {
+			return i, nil
+		}
+	}
+	a.results = append(a.results, discovery.HostResult{
+		IP:         ip,
+		IsBMC:      true,
+		Confidence: 100,
+		Vendor:     directVendor,
+	})
+	host := a.results[len(a.results)-1]
+	return len(a.results) - 1, func() tea.Msg {
+		return directHostEnrichedMsg{host: discovery.EnrichResults([]discovery.HostResult{host})[0]}
+	}
+}
+
+// applyDirectVendor replaces the placeholder vendor for ip, if it still has
+// it, with name.
+func (a *App) applyDirectVendor(ip, name string) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+	for i := range a.results {
+		if a.results[i].IP == ip && a.results[i].Vendor == directVendor {
+			a.results[i].Vendor = name
+		}
+	}
 }
 
 /* ---------------- COMMANDS ---------------- */
@@ -413,35 +446,17 @@ func runVMAction(host, isoURL, user, pass, manufacturer, action string) tea.Cmd 
 
 func runMCInfo(host, user, pass string) tea.Cmd {
 	return func() tea.Msg {
-		var (
-			info    *ipmi.MCInfo
-			lan     *ipmi.LANInfo
-			chassis *ipmi.ChassisStatus
-			infoErr error
-		)
-
-		var wg sync.WaitGroup
-		wg.Add(3)
-
-		go func() {
-			defer wg.Done()
-			info, infoErr = ipmi.GetMCInfo(host, user, pass)
-		}()
-		go func() {
-			defer wg.Done()
-			lan, _ = ipmi.GetLANInfo(host, user, pass)
-		}()
-		go func() {
-			defer wg.Done()
-			chassis, _ = ipmi.GetChassisStatus(host, user, pass)
-		}()
-
-		wg.Wait()
-
-		if infoErr != nil {
-			return mcInfoMsg{Err: infoErr}
+		// Sequential, not parallel: concurrent session set-ups to one BMC
+		// are refused by some (iDRAC9: "insufficient resources for
+		// session"), which failed the whole connect whenever mc info lost.
+		// runIPMICommand also serialises per host; mc info goes first so a
+		// bad password fails fast without two more round-trips.
+		info, err := ipmi.GetMCInfo(host, user, pass)
+		if err != nil {
+			return mcInfoMsg{Err: err}
 		}
-
+		lan, _ := ipmi.GetLANInfo(host, user, pass)
+		chassis, _ := ipmi.GetChassisStatus(host, user, pass)
 		return mcInfoMsg{Info: info, LAN: lan, Chassis: chassis}
 	}
 }
@@ -672,6 +687,25 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.logf("Scan of %s complete — %d host(s) found", a.lastSubnet, len(a.results))
 		return a, nil
 
+	case directHostEnrichedMsg:
+		for i := range a.results {
+			if a.results[i].IP != msg.host.IP {
+				continue
+			}
+			r := &a.results[i]
+			if r.Hostname == "" {
+				r.Hostname = msg.host.Hostname
+			}
+			if msg.host.HasRedfish {
+				r.HasRedfish = true
+				r.RedfishVersion = msg.host.RedfishVersion
+				r.RedfishManufacturer = msg.host.RedfishManufacturer
+				r.RedfishModel = msg.host.RedfishModel
+			}
+		}
+		a.applyDirectVendor(msg.host.IP, msg.host.RedfishManufacturer)
+		return a, nil
+
 	case mcInfoMsg:
 		a.ipmiLoading = false
 		if msg.Err != nil {
@@ -689,6 +723,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.sessionCache.Set(hostIP, a.username, a.password)
 			a.detailsCache[hostIP] = &ipmi.HostDetails{MCInfo: msg.Info, LAN: msg.LAN, Chassis: msg.Chassis}
 			a.recordRecentConnection(hostIP, a.username)
+			if msg.Info != nil {
+				a.applyDirectVendor(hostIP, msg.Info.ManufacturerName)
+			}
 		}
 		a.mcInfo = msg.Info
 		a.lanInfo = msg.LAN
@@ -1027,6 +1064,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Favourites management modal routing.
 		if a.activeFavDialog != nil {
 			changed, closed, cmd := a.activeFavDialog.Update(msg)
+			for _, c := range a.activeFavDialog.TakeCreds() {
+				if c.pass == "" {
+					a.sessionCache.Delete(c.ip)
+				} else {
+					a.sessionCache.Set(c.ip, c.user, c.pass)
+				}
+			}
 			if changed {
 				a.favourites = a.activeFavDialog.items
 				_ = config.Update(func(c *config.Config) {
@@ -1082,7 +1126,10 @@ func (a *App) handleMenuAction(action string) (tea.Model, tea.Cmd) {
 		a.activeDialog = NewConnectBMCDialog("", a.username)
 		return a, textinput.Blink
 	case action == "favourites-dialog":
-		a.activeFavDialog = NewFavouritesDialog(a.favourites)
+		a.activeFavDialog = NewFavouritesDialog(a.favourites, func(ip string) (string, bool) {
+			_, pass, ok := a.sessionCache.Get(ip)
+			return pass, ok
+		})
 		return a, nil
 	case strings.HasPrefix(action, "recent-connect:"):
 		idx, _ := strconv.Atoi(strings.TrimPrefix(action, "recent-connect:"))
@@ -1480,29 +1527,14 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		// Add the host to results if not already present, then connect directly.
-		targetIdx := -1
-		for i, r := range a.results {
-			if r.IP == ip {
-				targetIdx = i
-				break
-			}
-		}
-		if targetIdx < 0 {
-			a.results = append(a.results, discovery.HostResult{
-				IP:         ip,
-				IsBMC:      true,
-				Confidence: 100,
-				Vendor:     "Direct",
-			})
-			targetIdx = len(a.results) - 1
-		}
-		a.selectedHost = targetIdx
+		idx, enrich := a.addDirectHost(ip)
+		a.selectedHost = idx
 		a.username = user
 		a.password = pass
 		a.ipmiLoading = true
 		a.status = "Connecting to " + ip
 		a.logf("Direct connect to %s as %s", ip, user)
-		return a, tea.Batch(a.spinner.Tick, runMCInfo(ip, user, pass))
+		return a, tea.Batch(a.spinner.Tick, runMCInfo(ip, user, pass), enrich)
 
 	case "log-start":
 		dlg := a.activeDialog
