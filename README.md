@@ -171,6 +171,22 @@ Full vendor-specific implementations for:
 
 ---
 
+## Tested Hardware
+
+Confirmed on real hardware — connect (BMC Info), SOL console, and SOL close/re-open with `[F10]` then `[O]`:
+
+| Vendor     | Controller | Firmware      | Release | Date       |
+|------------|------------|---------------|---------|------------|
+| Dell       | iDRAC9     | 4.20          | 0.6.5   | 2026-10-28 |
+| HP         | iLO        | not recorded  | 0.6.5   | 2026-10-28 |
+| Supermicro | BMC        | not recorded  | 0.6.5   | 2026-10-28 |
+
+Earlier, separately: Redfish enumeration and virtual media on HP iLO 4 (ProLiant ML310e Gen8 v2, FW 2.54) — see `internal/redfish/ilo.go`.
+
+Not yet tested on hardware: Oracle/Sun ILOM, Lenovo XCC, Cisco CIMC, Quanta, other iLO generations. Reports welcome.
+
+---
+
 ## Requirements
 
 Both `nmap` and `ipmitool` must be on your `PATH` at runtime.
