@@ -191,6 +191,15 @@ Earlier, separately: Redfish enumeration and virtual media on HP iLO 4 (ProLiant
 
 Not yet tested on hardware: Oracle/Sun ILOM, Lenovo XCC, Cisco CIMC, Quanta, other iLO generations. Reports welcome.
 
+To report a BMC, run `scripts/fy-capture.sh` against it and attach the output:
+
+```bash
+scripts/fy-capture.sh <name> <bmc-ip> <user>
+tar czf fyrtaarn-fixtures.tgz -C ~ fyrtaarn-fixtures
+```
+
+It is read-only — ipmitool read commands and Redfish GETs, nothing that changes BMC state — and runs one command at a time. It captures the IPMI output fyrtaarn parses, plus a Redfish walk of Systems, Managers (including VirtualMedia slots), Chassis sensors and SessionService, with timings, into `~/fyrtaarn-fixtures/<name>/`. The password is prompted for without echo and never written to disk or passed on a command line. The output does contain serial numbers, MAC and IP addresses, UUIDs and BMC user names: review or redact it before sharing publicly. Needs `ipmitool`, `curl` and `python3`.
+
 ---
 
 ## Requirements
@@ -470,6 +479,10 @@ For detailed technical writeups and excellent explanations of:
 ---
 
 ## Changelog
+
+### Unreleased
+
+- **Hardware capture script** — `scripts/fy-capture.sh` collects, read-only, everything needed to support or debug a BMC: the IPMI output fyrtaarn parses and a Redfish walk (Systems, Managers and VirtualMedia slots, Chassis sensors, SessionService), with per-call status and timing. The password goes to ipmitool via `-E` and to curl via a config file on a pipe, never argv or disk; commands run sequentially so BMCs that refuse overlapping sessions (iDRAC9) are fine. Documented under Tested Hardware
 
 ### 0.6.6
 
