@@ -44,10 +44,10 @@ The name reflects the project's purpose: visibility, remote control, and infrast
 - Bubble Tea TUI with alt-screen mode
 - Multi-theme engine with 20 themes (F2 to cycle; Theme submenu for direct selection)
 - Keyboard navigation and mouse support (cell-motion)
-- Menu bar (F9) — File > **Connect to BMC** / New Scan / Export / **Start Log** / **Stop Log** / Theme submenu / Exit; Help > About
+- Menu bar (F9) — File > **Connect to BMC** / **Recent Connections** / **Favourites** / New Scan / Export / **Start Log** / **Stop Log** / Theme submenu / Exit; Help > About
 - Compact MC-style dropdown menus with submenu navigation
 - MC-style modal windows — all dialogs and popups rendered as centered bordered windows with the title embedded in the top border line (`╭── Title ──╮`) and a drop shadow; consistent chrome across scan dialog, login, export, power control, user management, virtual media, about, and loading screens
-- Menu bar keyboard accelerators — F9 activates the bar; bare letter keys navigate without Alt: **F**ile / **H**elp at top level; **C**onnect to BMC / **N**ew Scan / **E**xport / **L**og start / **S**top log / **T**heme / e**X**it / **A**bout in dropdowns; accelerator character rendered underlined
+- Menu bar keyboard accelerators — F9 activates the bar; bare letter keys navigate without Alt: **F**ile / **H**elp at top level; **C**onnect to BMC / **R**ecent Connections / Fa**v**ourites (**M**anage Favourites) / **N**ew Scan / **E**xport / **L**og start / **S**top log / **T**heme / e**X**it / **A**bout in dropdowns; accelerator character rendered underlined
 - F2 and F9 pass through to the BMC when the SOL console is active rather than triggering TUI chrome
 - Async spinner during all network operations
 - Status bar shows context-sensitive keyboard hints per screen with live pagination for scrollable views; shows "No scan performed" before the first scan runs
@@ -78,7 +78,7 @@ The name reflects the project's purpose: visibility, remote control, and infrast
 
 ### BMC Management
 
-- **BMC info** — device ID, firmware revision, IPMI version, manufacturer, product name
+- **BMC info** — device ID, firmware revision, IPMI version, manufacturer, product name; server model from Redfish where available (fetched with your credentials after login, shown as a separate Model line — some BMCs report only a numeric product name, e.g. iDRAC9 `Unknown (0x100)`)
 - **Network info** — IP address, MAC, subnet mask, gateway
 - **Chassis status** — power state, power fault, power overload, drive fault, cooling fault
 - **Sensor / SDR viewer** — scrollable live sensor readings; 90-second timeout for large repositories
@@ -90,16 +90,19 @@ The name reflects the project's purpose: visibility, remote control, and infrast
   - Cyan — informational (default)
 - **FRU / hardware inventory** — scrollable `ipmitool fru` output with device section headers
 - **Power control** — on, off, soft shutdown, reset; dialog shows current chassis power state
-- **SOL console** — Serial over LAN runs inside a TUI pane (`[O]` from BMC Info); ipmitool executes in a pty so the menu bar and status bar stay visible; full VT100/VT220 screen emulator (cols×rows character grid) — cursor positioning, clear-screen, scroll regions, insert/delete lines, erase-in-line/display, and all standard CSI sequences are honoured so GRUB menus, AMI/Award BIOS splashes, and interactive programs render correctly; bare `\r` (firmware line endings) and `\r\n` both handled; backspace is implemented as `ESC[D` + `Ctrl+D` (cursor-left then forward-delete) so it works correctly in GRUB's readline regardless of which erase character the BMC serial port uses; 1000-line scrollback history; `[F10]` disconnects cleanly — ipmitool is told to exit and the BMC's SOL slot is released before a new session can start, so reconnecting works straight away; ipmitool runs with Ctrl+] as its escape character so `~.` typed at the start of a line reaches the console instead of killing the session; if ipmitool exits on its own its last message (e.g. `SOL payload already active on another session`) is shown in the status bar; `[PgUp/PgDn]` scroll; all keys including F1–F12 forwarded to the BMC; Ctrl+C forwarded rather than quitting the app; pressing `[O]` performs a live chassis power check — if the chassis is off a dialog offers to power it on and open SOL immediately so the full boot sequence is captured from BIOS POST; if the chassis is already on SOL opens directly without a dialog
+- **SOL console** — Serial over LAN runs inside a TUI pane (`[O]` from BMC Info); ipmitool executes in a pty so the menu bar and status bar stay visible; full VT100/VT220 screen emulator (cols×rows character grid) — cursor positioning, clear-screen, scroll regions, insert/delete lines, erase-in-line/display, and all standard CSI sequences are honoured so GRUB menus, AMI/Award BIOS splashes, and interactive programs render correctly; bare `\r` (firmware line endings) and `\r\n` both handled; backspace is implemented as `ESC[D` + `Ctrl+D` (cursor-left then forward-delete) so it works correctly in GRUB's readline regardless of which erase character the BMC serial port uses; 1000-line scrollback history; `[F10]` disconnects cleanly — ipmitool is told to exit and the BMC's SOL slot is released before a new session can start, so reconnecting works straight away; ipmitool runs with Ctrl+] as its escape character so `~.` typed at the start of a line reaches the console instead of killing the session; if ipmitool exits on its own its last message is shown in the status bar; if another session already holds the BMC's SOL console, a dialog asks before taking it over (default Cancel) — the BMC cannot tell a colleague's live console from one left behind by a crashed client; menu-bar mouse clicks are ignored while SOL is open, as F9 is; **not available on Windows builds** (needs ConPTY) — `[O]` shows the equivalent ipmitool command to run in a terminal instead; `[PgUp/PgDn]` scroll; all keys including F1–F12 forwarded to the BMC; Ctrl+C forwarded rather than quitting the app; pressing `[O]` performs a live chassis power check — if the chassis is off a dialog offers to power it on and open SOL immediately so the full boot sequence is captured from BIOS POST; if the chassis is already on SOL opens directly without a dialog
 - **Virtual media** — Redfish ISO mount and eject via `InsertMedia`/`EjectMedia` actions; walks `Managers → VirtualMedia` to find the CD/DVD slot (`[V]` from BMC Info; requires Redfish-capable host); accepts an HTTP(S) URL or a local file path — a local ISO is served to the BMC from an ad-hoc HTTP server on this machine (random URL path, local address chosen by route to the BMC) for as long as it stays mounted, stopped on eject, on mounting another image, or on exit; Supermicro hosts are probed for Redfish VirtualMedia first and IKVM-only firmware gets a clear unsupported error
-- **Direct connect** — File > Connect to BMC opens a dialog (IP, username, password) and connects without running a scan; host is added to the results tree so all subsequent operations work normally
+- **Direct connect** — File > Connect to BMC opens a dialog (IP, username, password) and connects without running a scan; host is added to the results tree so all subsequent operations work normally, and gets the same reverse-DNS and Redfish enrichment a scan gives it
+- **Recent Connections** — File > Recent Connections lists the last 5 hosts connected to, newest first, one entry per IP; selecting one reconnects straight away if this session already holds its credentials, otherwise opens Connect to BMC pre-filled with IP and username. Saved to `config.json` (IP and username only)
+- **Favourites** — up to 15 pinned hosts under File > Favourites, each with an optional name (shown as `Name — IP (user)`); File > Favourites > Manage Favourites... adds (`[A]`), edits (`[Enter]`) and deletes (`[D]`) them. The form's password box is session-only: it goes into the in-memory credential cache so the favourite connects without prompting until you quit, and is never written to disk. Saved to `config.json` (name, IP and username only)
 - **Session log** — File > Start Log… prompts for a file path and begins logging all activity; SOL output is written as rendered plain text (lines are flushed to the log as they scroll off the top of the VT100 screen buffer, final screen state captured on disconnect); scan results, BMC connections, and SOL start/end events are logged with timestamps; File > Stop Log closes the file
 
 ### Architecture
 
-- Provider abstraction interface (groundwork only; vendor implementations pending)
+- Per-vendor virtual media via `redfish.VirtualMediaProvider`, selected by manufacturer in `redfish.NewProvider`; everything else is vendor-neutral through ipmitool
 - One IPMI session per BMC at a time — mc info, lan print and chassis status are fetched sequentially, and every ipmitool call takes a per-host lock; some BMCs (iDRAC9) refuse overlapping session set-ups with "insufficient resources for session"
 - Per-command timeouts — 15 s for single-round-trip commands; 90 s for bulk SDR/SEL reads
+- Passwords never on a command line — ipmitool gets the session password via its environment (`-E` with `IPMITOOL_PASSWORD`), so it does not show up in `ps`; new BMC user passwords are typed into ipmitool's own prompts through a pty (on Windows, which has no pty support, the new password is still passed as an argument)
 - ipmitool credential string zeroed from memory after each command
 - Structured file logger (`internal/logging`) — level-filtered, RFC3339 timestamps, defaults to discard (opt-in)
 - Scan progress bar — status bar shows `[████░░░] 89/256 · 3 found` during nmap scans; CIDR host count is the denominator; nmap `--stats-every 2s` drives the bar; `</host>` closures in the XML stream increment the found counter
@@ -142,10 +145,11 @@ The name reflects the project's purpose: visibility, remote control, and infrast
 ### Virtual Media
 
 - Per-vendor backends — current implementation uses a generic Redfish walker
-  that works on iDRAC 9 and likely XCC but misses HP iLO (numeric slot paths)
-  and any vendor without Redfish VirtualMedia support:
-  - `ilo.go` — iLO 3/4 via RIBCL; iLO 5/6 via Redfish with MediaTypes-based slot
-    discovery and session-token auth
+  that handles iDRAC 9, HP iLO 4 (via its `Oem.Hp.Actions`) and Supermicro
+  MegaRAC; XCC is untested; vendors without Redfish VirtualMedia need their
+  own backend:
+  - `ilo.go` — iLO 3 via RIBCL (no Redfish); iLO 5/6 session-token auth
+    (iLO 4 needs no backend — the generic walker handles it)
   - `drac.go` — iDRAC 7/8 via WSMAN; iDRAC 9 Redfish + Dell OEM RemoteImage extension
   - `supermicro.go` — AMI MegaRAC Redfish where available; detect IKVM-only firmware
     (implemented in 0.6.3 — delegates to the generic walker after a VirtualMedia probe)
@@ -154,10 +158,12 @@ The name reflects the project's purpose: visibility, remote control, and infrast
   - `cimc.go` — Cisco CIMC XML API 2.0 (no Redfish VirtualMedia surface)
 - Generic Redfish fallback: replace path-sniffing slot discovery with `MediaTypes`
   array inspection so numeric and non-descriptive slot paths are found correctly
+  (done — the generic walker accepts a slot by path or by `MediaTypes`)
 - Floppy / USB image support
 - Remote media redirection
 - Surface BMC-reachability requirement to user (ISO URL must be accessible by the
-  BMC, not the client; currently not communicated in the mount dialog)
+  BMC, not the client) (done — the mount dialog says so; local files are
+  served to the BMC automatically since 0.6.3)
 
 ### Providers
 
@@ -464,6 +470,23 @@ For detailed technical writeups and excellent explanations of:
 ---
 
 ## Changelog
+
+### 0.6.6
+
+- **Passwords off the command line** — every ipmitool call, SOL included, passed the session password as `-P <password>`, readable by any local user via `ps` or `/proc/<pid>/cmdline` while it ran. It now goes in the child's environment with `-E`. ipmitool's `-E` reads `IPMITOOL_PASSWORD` before `IPMI_PASSWORD`, so fyrtaarn sets the former and strips any inherited copy of either, which would otherwise override it. `user set password` also took the *new* password as an argument; it now runs in a pty and answers ipmitool's two `getpass` prompts, each written only after its prompt appears (glibc's `getpass` flushes pending input before prompting). ipmitool's `exec` file mode was rejected for this: its parser truncates at `#` and rewrites quoted spaces, which would corrupt real passwords. Windows has no pty support, so there the new password is still passed as an argument
+- **SOL takeover asks first** — fyrtaarn used to send `sol deactivate` before every activation, which silently disconnected anyone else on that BMC's SOL console. It now activates normally; if the BMC says the console is in use, a dialog offers to take it over (default Cancel), since the BMC cannot tell a colleague's live console from one left by a crashed client
+- **Menu clicks during SOL** — mouse clicks on the menu bar were handled on every screen, even though the keyboard blocks the menu in SOL and while loading. Clicking e.g. Connect to BMC or a favourite during SOL switched screens with the SOL pane still live, and a later `[O]` replaced it without tearing it down, stranding ipmitool on the BMC's SOL slot. Clicks are now ignored on the SOL screen and while loading or scanning, matching the keyboard
+- **Server model** — after login, the server model is read from Redfish with your credentials and shown as a separate Model line on BMC Info (iDRAC9 reports its IPMI product name only as `Unknown (0x100)`, and refuses the unauthenticated scan-time probe). The IPMI product name is left unchanged, since the compliance CVE lookup keys on it
+- **Windows: SOL explained up front** — the built-in SOL pane needs a pty, which `creack/pty` does not provide on Windows. `[O]` now says so straight away and shows the equivalent `ipmitool … -E sol activate` command, instead of running a chassis check and power prompt that end in an error
+- **Virtual media dialog** — states that an ISO URL is fetched by the BMC and must be reachable from the BMC's network
+- **README** — documented Recent Connections and Favourites; Planned Features no longer lists MediaTypes slot discovery or the iLO numeric-path gap as outstanding
+- **SEL viewer: missing and mangled records** — the SEL parser expected exactly the six-field standard line. Per ipmitool's `ipmi_sel.c`, OEM records without a timestamp (3 fields) and kernel-panic records (2 fields) were dropped from the viewer entirely; threshold and memory-ECC events carry a 7th field (`Reading 47 > Threshold 45 degrees C`) that was glued onto Direction, so a cleared threshold alarm never matched `Deasserted` and was not coloured green; timestamped OEM records had their hex data shown as the Direction. Every record shape is now parsed, extra detail goes into the event text, and Direction is only ever `Asserted`/`Deasserted`
+- **Parser tests** — `parseMCInfo`, `parseLANInfo`, `parseChassisStatus`, `parseSDR`, `parseSEL`, `parseFRU` and `parseUserList` now have tests. The `mc info` fixture is a real iDRAC9 capture; the others are built from the exact printf formats in the ipmitool 1.8.18 source (file and line cited in each fixture) until real captures replace them
+- **Removed `internal/providers`** — an empty `Provider interface{}` plus three files containing only a package line, imported by nothing since the initial commit. The working per-vendor seam is `redfish.VirtualMediaProvider`; a wider vendor layer can be designed once real vendor differences call for one
+- **CI: tag-push releases fire again** — `release.yml` only triggered on `v*` tags, and tags have had no `v` prefix since 0.6.3, so pushing a release tag did nothing. It now triggers on `[0-9]+.[0-9]+.[0-9]+` (GitHub's documented semantic-version filter form) and names the release `Fyrtaarn <tag>`, as Publish Release does. Publish Release's own tag push cannot double-trigger it: pushes made with `GITHUB_TOKEN` start no workflow runs
+- **CI: action updates** — setup-go 7.0.0 → 7.1.0 and action-gh-release 3.0.3 → 3.0.4 (Dependabot PR #2, folded in here because the shared build workflow moved where those pins live)
+- **Windows SOL dialog** — shows the PowerShell form (`$env:IPMITOOL_PASSWORD='…'`) as well as Command Prompt's `set`
+- **CI: one build definition** — the target matrix and build steps now live only in `build-binaries.yml`, a reusable workflow called by Build Fyrtaarn, Publish Release and the tag-push Release workflow. The copies had already drifted: `release.yml` was missing linux-armv7, darwin-amd64 and darwin-arm64. Release uploads now take whatever was built (`dist/fyrtaarn-*`) instead of a second hand-kept list. Also: the release version reaches shell steps via an environment variable rather than inline `${{ }}` (no script injection from the input), Build Fyrtaarn now fetches tags so `git describe` gives a version rather than a bare hash, and Publish Release's version prompt now says no `v` prefix, matching the tag convention
 
 ### 0.6.5
 

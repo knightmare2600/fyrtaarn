@@ -40,8 +40,11 @@ func DisableUser(host, adminUser, adminPass string, userID int) error {
 
 func SetUserPassword(host, adminUser, adminPass string, userID int, newPass string) error {
 	defer wipeString(&newPass)
-	_, err := runIPMICommand(host, adminUser, adminPass, ipmiShortTimeout,
-		"user", "set", "password", strconv.Itoa(userID), newPass)
+	// Omitting the password makes ipmitool prompt for it twice (getpass),
+	// keeping it out of argv; see runIPMIPrompted.
+	_, err := runIPMIPrompted(host, adminUser, adminPass, ipmiShortTimeout,
+		[]string{newPass, newPass},
+		"user", "set", "password", strconv.Itoa(userID))
 	return err
 }
 

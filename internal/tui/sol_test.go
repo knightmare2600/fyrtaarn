@@ -8,8 +8,15 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/knightmare2600/fyrtaarn/internal/discovery"
 	"github.com/knightmare2600/fyrtaarn/internal/ipmi"
 )
+
+func discoveryHost(ip string) discovery.HostResult {
+	return discovery.HostResult{IP: ip, IsBMC: true}
+}
 
 // These tests use ordinary processes as stand-ins for ipmitool to pin down
 // the pty teardown behaviour that broke SOL reconnect: closing the pty while
@@ -153,4 +160,78 @@ func TestStaleSOLReadDiscarded(t *testing.T) {
 		t.Error("stale read was ingested into the current pane")
 	}
 	p.shutdown()
+}
+
+func TestSOLInUseOffersTakeover(t *testing.T) {
+	shortSOLTimeouts(t)
+	// Stand-in for ipmitool refusing activation (completion code 0x80).
+	p := startTestPane(t, "sh", "-c", "exit 1")
+	if !p.waitExit(2 * time.Second) {
+		t.Fatal("stand-in did not exit")
+	}
+	p.ingest([]byte("Info: SOL payload already active on another session\r\n"))
+
+	a := &App{solPane: p, solGeneration: 1, currentScreen: screenSOL}
+	a.results = append(a.results, discoveryHost("10.0.0.20"))
+	a.Update(solDoneMsg{gen: 1, exitErr: p.exitErr})
+	if a.activeDialog != nil {
+		t.Fatal("takeover dialog shown before teardown finished")
+	}
+	a.Update(solClosedMsg{host: "10.0.0.20"})
+	d := a.activeDialog
+	if d == nil || d.Title != "SOL Console In Use" {
+		t.Fatalf("want takeover dialog, got %+v", d)
+	}
+	if d.buttons[d.focus].Action != "cancel" {
+		t.Errorf("takeover dialog defaults to %q, want cancel", d.buttons[d.focus].Action)
+	}
+}
+
+func TestSOLOtherFailureNoTakeover(t *testing.T) {
+	shortSOLTimeouts(t)
+	p := startTestPane(t, "sh", "-c", "exit 1")
+	p.waitExit(2 * time.Second)
+	p.ingest([]byte("Error: Unable to establish IPMI v2 / RMCP+ session\r\n"))
+
+	a := &App{solPane: p, solGeneration: 1, currentScreen: screenSOL}
+	a.results = append(a.results, discoveryHost("10.0.0.21"))
+	a.Update(solDoneMsg{gen: 1, exitErr: p.exitErr})
+	a.Update(solClosedMsg{host: "10.0.0.21"})
+	if a.activeDialog != nil {
+		t.Errorf("non-in-use failure offered takeover: %+v", a.activeDialog)
+	}
+}
+
+func TestMouseIgnoredDuringSOL(t *testing.T) {
+	a := &App{currentScreen: screenSOL}
+	a.Update(tea.MouseMsg{X: 1, Y: 0, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	if a.currentScreen != screenSOL || a.activeDialog != nil {
+		t.Errorf("menu click acted during SOL: screen %v dialog %+v", a.currentScreen, a.activeDialog)
+	}
+}
+
+func TestSOLUnsupportedExplainsUpFront(t *testing.T) {
+	old := solPaneSupported
+	solPaneSupported = false
+	t.Cleanup(func() { solPaneSupported = old })
+
+	a := &App{currentScreen: screenMCInfo, username: "root"}
+	a.results = append(a.results, discoveryHost("10.0.0.30"))
+	_, cmd := a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+	d := a.activeDialog
+	if d == nil || d.Title != "SOL Console Not Available" {
+		t.Fatalf("want unsupported dialog, got %+v", d)
+	}
+	if cmd != nil || a.ipmiLoading {
+		t.Error("started a chassis check despite SOL being unavailable")
+	}
+	for _, want := range []string{
+		"-H 10.0.0.30 -U root -E sol activate",
+		"set IPMITOOL_PASSWORD=",   // Command Prompt
+		"$env:IPMITOOL_PASSWORD='", // PowerShell
+	} {
+		if !strings.Contains(d.Body, want) {
+			t.Errorf("dialog lacks %q: %q", want, d.Body)
+		}
+	}
 }

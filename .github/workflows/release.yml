@@ -1,84 +1,25 @@
 name: Release Fyrtaarn
 
+# Tag-push release: builds all targets (via build-binaries.yml) and
+# publishes a GitHub release for the pushed tag, e.g.
+#   git tag 0.6.6 && git push origin 0.6.6
+# Tags have no "v" prefix (since 0.6.3), matching the README changelog.
+# Publish Release's own tag push does not trigger this: pushes made with
+# GITHUB_TOKEN start no workflow runs.
+
 on:
   push:
     tags:
-      - "v*"
+      - "[0-9]+.[0-9]+.[0-9]+"
 
 permissions:
   contents: write
 
 jobs:
   build:
-    name: Build ${{ matrix.binary }}
-    runs-on: ubuntu-latest
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-            binary: fyrtaarn-linux-amd64
-          - goos: linux
-            goarch: arm64
-            binary: fyrtaarn-linux-arm64
-          - goos: linux
-            goarch: ppc64
-            binary: fyrtaarn-linux-ppc64
-            note: "PowerPC 64-bit big-endian (G3/G4/G5 era)"
-          - goos: linux
-            goarch: mipsle
-            gomips: softfloat
-            binary: fyrtaarn-linux-mipsel
-            note: "mipsel — MIPS little-endian 32-bit, softfloat"
-          - goos: linux
-            goarch: mips64le
-            gomips64: softfloat
-            binary: fyrtaarn-linux-mips64el
-            note: "mips64el — MIPS little-endian 64-bit, softfloat"
-          - goos: windows
-            goarch: amd64
-            binary: fyrtaarn-windows-amd64.exe
-          - goos: windows
-            goarch: arm64
-            binary: fyrtaarn-windows-arm64.exe
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-
-      - name: Setup Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-
-      - name: Tidy and download dependencies
-        run: go mod tidy
-
-      - name: Build
-        env:
-          GOOS:        ${{ matrix.goos }}
-          GOARCH:      ${{ matrix.goarch }}
-          GOMIPS:      ${{ matrix.gomips }}
-          GOMIPS64:    ${{ matrix.gomips64 }}
-          CGO_ENABLED: 0
-        run: |
-          mkdir -p dist
-          go build \
-            -ldflags "-X main.Version=${GITHUB_REF_NAME} \
-                      -X main.Commit=$(git rev-parse --short HEAD) \
-                      -X main.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            -o dist/${{ matrix.binary }} \
-            ./cmd/fyrtaarn
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: ${{ matrix.binary }}
-          path: dist/${{ matrix.binary }}
+    uses: ./.github/workflows/build-binaries.yml
+    with:
+      version: ${{ github.ref_name }}
 
   release:
     name: Publish GitHub Release
@@ -102,18 +43,14 @@ jobs:
           cat SHA256SUMS.txt
 
       - name: Create release
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
+          name: Fyrtaarn ${{ github.ref_name }}
           draft: false
           generate_release_notes: true
+          # Whatever build-binaries.yml produced — no second target list to drift.
           files: |
-            dist/fyrtaarn-linux-amd64
-            dist/fyrtaarn-linux-arm64
-            dist/fyrtaarn-linux-ppc64
-            dist/fyrtaarn-linux-mipsel
-            dist/fyrtaarn-linux-mips64el
-            dist/fyrtaarn-windows-amd64.exe
-            dist/fyrtaarn-windows-arm64.exe
+            dist/fyrtaarn-*
             dist/SHA256SUMS.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

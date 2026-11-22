@@ -206,9 +206,10 @@ type App struct {
 	redfishOffset int
 
 	solPane       *solPane
-	solGeneration int  // bumped on session start and close; guards stale SOL messages
-	solAfterPower bool // when true, powerMsg "on" chains into SOL connect
-	solClosing    bool // a session teardown is in flight; no new session until solClosedMsg
+	solGeneration int    // bumped on session start and close; guards stale SOL messages
+	solAfterPower bool   // when true, powerMsg "on" chains into SOL connect
+	solClosing    bool   // a session teardown is in flight; no new session until solClosedMsg
+	solInUseHost  string // activation was refused as in use; offer takeover once closed
 
 	sessionLog *os.File // nil when logging is off
 
@@ -337,6 +338,26 @@ func (a *App) connectToHost(ip, username string) (tea.Model, tea.Cmd) {
 
 	a.activeDialog = NewConnectBMCDialog(ip, username)
 	return a, tea.Batch(textinput.Blink, enrich)
+}
+
+// redfishModelMsg carries the server model and manufacturer from an
+// authenticated Redfish walk (see fetchRedfishModel).
+type redfishModelMsg struct {
+	ip, manufacturer, model string
+}
+
+// fetchRedfishModel reads the server model with credentials, for hosts whose
+// unauthenticated scan-time probe could not (iDRAC9 answers 401 on
+// /redfish/v1/Systems/ without a login). Reuses redfish.EnumerateFull; any
+// failure, including no Redfish at all, simply leaves the model unknown.
+func fetchRedfishModel(ip, user, pass string) tea.Cmd {
+	return func() tea.Msg {
+		e, err := redfish.EnumerateFull(ip, user, pass)
+		if err != nil || e == nil || len(e.Systems) == 0 {
+			return redfishModelMsg{ip: ip}
+		}
+		return redfishModelMsg{ip: ip, manufacturer: e.Systems[0].Manufacturer, model: e.Systems[0].Model}
+	}
 }
 
 // directVendor is the placeholder Vendor for a host added without a scan,
@@ -636,6 +657,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case tea.MouseMsg:
+		// Same gates as the keyboard. In SOL the pane owns input (F9 is
+		// forwarded, F10 leaves) — a menu click there could switch screens
+		// with the pane still live, and a later [O] would replace it without
+		// tearing it down, stranding ipmitool on the BMC's SOL slot.
+		if a.currentScreen == screenSOL || a.scanning || a.ipmiLoading {
+			return a, nil
+		}
 		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
 			action, _ := a.menuBar.HandleMouse(msg.X, msg.Y)
 			if action != "" {
@@ -706,7 +734,22 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.applyDirectVendor(msg.host.IP, msg.host.RedfishManufacturer)
 		return a, nil
 
+	case redfishModelMsg:
+		for i := range a.results {
+			r := &a.results[i]
+			if r.IP != msg.ip || msg.model == "" {
+				continue
+			}
+			r.RedfishModel = strings.TrimSpace(msg.model)
+			if r.RedfishManufacturer == "" {
+				r.RedfishManufacturer = strings.TrimSpace(msg.manufacturer)
+			}
+		}
+		a.applyDirectVendor(msg.ip, msg.manufacturer)
+		return a, nil
+
 	case mcInfoMsg:
+		var modelCmd tea.Cmd
 		a.ipmiLoading = false
 		if msg.Err != nil {
 			a.status = msg.Err.Error()
@@ -726,6 +769,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.Info != nil {
 				a.applyDirectVendor(hostIP, msg.Info.ManufacturerName)
 			}
+			if a.results[a.selectedHost].RedfishModel == "" {
+				modelCmd = fetchRedfishModel(hostIP, a.username, a.password)
+			}
 		}
 		a.mcInfo = msg.Info
 		a.lanInfo = msg.LAN
@@ -738,7 +784,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				msg.Info.ManufacturerName, msg.Info.ProductName,
 				msg.Info.FirmwareRevision)
 		}
-		return a, nil
+		return a, modelCmd
 
 	case sdrMsg:
 		a.ipmiLoading = false
@@ -920,7 +966,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.status = "Power on sent — opening SOL console on " + host + "..."
 			cols := solDefaultCols
 			rows := max(a.contentH-4, 24)
-			return a, tea.Batch(a.spinner.Tick, startSOLPane(host, a.username, a.password, cols, rows))
+			return a, tea.Batch(a.spinner.Tick, startSOLPane(host, a.username, a.password, cols, rows, false))
 		}
 		a.status = fmt.Sprintf("Power %s: command sent", msg.Action)
 		a.currentScreen = screenMCInfo
@@ -977,6 +1023,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.status = "SOL ended: " + reason
 			a.logf("SOL ended: %s", reason)
 		}
+		if strings.Contains(reason, solInUseMarker) {
+			// Ask once teardown finishes (keys are ignored until then).
+			a.solInUseHost = a.solHostIP()
+		}
 		return a, cmd
 
 	case solClosedMsg:
@@ -985,6 +1035,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			a.status = "SOL closed, but deactivate failed: " + msg.err.Error()
 			a.logf("SOL deactivate failed on %s: %v", msg.host, msg.err)
+		}
+		if a.solInUseHost != "" {
+			a.activeDialog = NewSOLTakeoverDialog(a.solInUseHost)
+			a.solInUseHost = ""
 		}
 		return a, nil
 
@@ -1248,7 +1302,7 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 		a.ipmiLoading = true
 		return a, tea.Batch(a.spinner.Tick, runMCInfo(host.IP, a.username, a.password))
 
-	case "open-sol":
+	case "open-sol", "sol-takeover":
 		a.activeDialog = nil
 		if len(a.results) == 0 {
 			return a, nil
@@ -1258,12 +1312,17 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		host := a.results[a.selectedHost].IP
+		takeover := action == "sol-takeover"
 		a.ipmiLoading = true
 		a.loadProgress = Progress{}
 		a.status = "Starting SOL session with " + host
+		if takeover {
+			a.status = "Taking over SOL session on " + host
+			a.logf("SOL takeover — %s", host)
+		}
 		cols := solDefaultCols
 		rows := max(a.contentH-4, 24)
-		return a, tea.Batch(a.spinner.Tick, startSOLPane(host, a.username, a.password, cols, rows))
+		return a, tea.Batch(a.spinner.Tick, startSOLPane(host, a.username, a.password, cols, rows, takeover))
 
 	case "power-on-sol":
 		a.activeDialog = nil
@@ -1755,6 +1814,12 @@ func (a *App) updateMCInfo(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		host := a.results[a.selectedHost].IP
+		if !solPaneSupported {
+			// Say so up front rather than after a chassis check and a
+			// power-on prompt that would end in an error.
+			a.activeDialog = NewSOLUnsupportedDialog(host, a.username)
+			return a, nil
+		}
 		// Do a live chassis check so we never show the power-on dialog for a
 		// chassis that is already running (cached data can be stale).
 		a.ipmiLoading = true

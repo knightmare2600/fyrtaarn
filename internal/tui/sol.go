@@ -706,22 +706,28 @@ func clampInt(v, lo, hi int) int {
 
 /* ---------------- COMMANDS ---------------- */
 
-// startSOLPane forks ipmitool sol activate inside a pty.
-func startSOLPane(host, user, pass string, cols, rows int) tea.Cmd {
+// solPaneSupported reports whether the built-in SOL pane can run here. It
+// needs a pty; creack/pty has no Windows (ConPTY) implementation.
+var solPaneSupported = runtime.GOOS != "windows"
+
+// solInUseMarker is the ipmitool message for an activation refused because
+// another session holds the BMC's SOL payload (completion code 0x80).
+const solInUseMarker = "already active on another session"
+
+// startSOLPane forks ipmitool sol activate inside a pty. With takeover set
+// it first sends "sol deactivate", which ends whichever session holds the
+// payload — the user has confirmed that (see NewSOLTakeoverDialog), since it
+// may be a colleague's live console rather than a stale one.
+func startSOLPane(host, user, pass string, cols, rows int, takeover bool) tea.Cmd {
 	return func() tea.Msg {
-		if runtime.GOOS == "windows" {
+		if !solPaneSupported {
 			return solReadMsg{Err: fmt.Errorf("built-in SOL pane not supported on Windows")}
 		}
-		// Best-effort: clear any SOL payload the BMC still thinks is active
-		// from a previous session that didn't end cleanly (app killed,
-		// terminal closed, network drop — none of which give the app a
-		// chance to run its own F10/quit deactivate logic). Most BMCs allow
-		// only one SOL session at a time, so a stuck slot makes every
-		// subsequent "sol activate" silently fail even though the chassis
-		// itself is powered on and reachable. Error is ignored: if nothing
-		// was actually active this just fails fast, and a real connectivity
-		// problem will surface again on the activate attempt below.
-		_ = ipmi.SOLDeactivate(host, user, pass)
+		// Error ignored: if nothing was active this fails fast, and a real
+		// connectivity problem surfaces again on the activate below.
+		if takeover {
+			_ = ipmi.SOLDeactivate(host, user, pass)
+		}
 
 		p, err := startSolProcess(ipmi.SOLCmd(host, user, pass), cols, rows)
 		if err != nil {

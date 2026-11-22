@@ -86,6 +86,8 @@ func NewVirtualMediaDialog() *Dialog {
 			"Enter an HTTP(S) URL, or a local file path — a local\n" +
 			"path is served to the BMC automatically from this\n" +
 			"machine for as long as the image stays mounted.\n" +
+			"A URL is fetched by the BMC itself, so it must be\n" +
+			"reachable from the BMC's network, not just from here.\n" +
 			"Host must support Redfish VirtualMedia.",
 		inputs:      []textinput.Model{inp},
 		inputLabels: []string{"ISO URL / Local Path"},
@@ -479,6 +481,45 @@ func NewSOLLaunchDialog(host string, powerOn bool) *Dialog {
 			{Label: "Cancel", Action: "cancel"},
 		},
 		focus: 0,
+	}
+}
+
+// NewSOLUnsupportedDialog explains that the built-in SOL pane is not
+// available on this platform and gives the equivalent ipmitool command to
+// run in a terminal instead (password via -E, never on the command line).
+func NewSOLUnsupportedDialog(host, user string) *Dialog {
+	return &Dialog{
+		Title: "SOL Console Not Available",
+		Body: "The built-in SOL console needs a pseudo-terminal, which\n" +
+			"this Windows build does not support yet (it needs ConPTY).\n\n" +
+			"Run SOL in a separate terminal instead. Set the password\n" +
+			"(Command Prompt or PowerShell form), then start SOL:\n\n" +
+			"  set IPMITOOL_PASSWORD=<password>\n" +
+			"  $env:IPMITOOL_PASSWORD='<password>'\n\n" +
+			fmt.Sprintf("  ipmitool -I lanplus -H %s -U %s -E sol activate\n\n", host, user) +
+			"Leave the console with ~. at the start of a line.",
+		buttons: []DialogButton{
+			{Label: "Close", Action: "cancel"},
+		},
+		focus: 0,
+	}
+}
+
+// NewSOLTakeoverDialog asks before ending another session's SOL console.
+// The BMC cannot say whether that session is live or left over from a crash.
+func NewSOLTakeoverDialog(host string) *Dialog {
+	return &Dialog{
+		Title: "SOL Console In Use",
+		Body: fmt.Sprintf(
+			"Another session already holds the SOL console on %s.\n\n"+
+				"It may be a colleague's live console, or one left over\n"+
+				"from a closed terminal or crashed client. Taking over\n"+
+				"disconnects it.", host),
+		buttons: []DialogButton{
+			{Label: "Take Over", Action: "sol-takeover"},
+			{Label: "Cancel", Action: "cancel"},
+		},
+		focus: 1, // default to the harmless choice
 	}
 }
 

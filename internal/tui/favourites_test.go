@@ -164,3 +164,17 @@ func TestDirectHostVendorFromMCInfoWhenNoRedfish(t *testing.T) {
 		t.Errorf("mc info vendor not applied: %q", a.results[idx].Vendor)
 	}
 }
+
+func TestRedfishModelAfterLogin(t *testing.T) {
+	a := &App{}
+	idx, _ := a.addDirectHost("10.0.0.11")
+	a.Update(redfishModelMsg{ip: "10.0.0.11"}) // walk failed: nothing changes
+	if a.results[idx].RedfishModel != "" || a.results[idx].Vendor != directVendor {
+		t.Fatalf("failed walk changed host: %+v", a.results[idx])
+	}
+	a.Update(redfishModelMsg{ip: "10.0.0.11", manufacturer: "Dell Inc.", model: " PowerEdge R640 "})
+	r := a.results[idx]
+	if r.RedfishModel != "PowerEdge R640" || r.RedfishManufacturer != "Dell Inc." || r.Vendor != "Dell Inc." {
+		t.Errorf("after authenticated walk: %+v", r)
+	}
+}

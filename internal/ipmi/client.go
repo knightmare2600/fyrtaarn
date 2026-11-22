@@ -4,10 +4,15 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/creack/pty"
 )
 
 const (
@@ -52,16 +57,7 @@ func runIPMICommand(
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	args := []string{
-		"-I", "lanplus",
-		"-H", host,
-		"-U", user,
-		"-P", pass,
-	}
-
-	args = append(args, command...)
-
-	cmd := exec.CommandContext(ctx, "ipmitool", args...)
+	cmd := ipmitoolCmd(ctx, host, user, pass, command...)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -79,6 +75,149 @@ func runIPMICommand(
 	}
 
 	return stdout.String(), nil
+}
+
+// ipmitoolCmd builds an ipmitool lanplus command for host. The session
+// password goes in the child's environment (-E) rather than in argv: argv
+// is world-readable (ps, /proc/<pid>/cmdline) for as long as the command
+// runs, the environment only to the same user and root. ipmitool's -E reads
+// IPMITOOL_PASSWORD before IPMI_PASSWORD (ipmi_main.c), so set the former
+// and drop any inherited copy of either, which would otherwise win.
+func ipmitoolCmd(ctx context.Context, host, user, pass string, command ...string) *exec.Cmd {
+	args := append([]string{
+		"-I", "lanplus",
+		"-H", host,
+		"-U", user,
+		"-E",
+	}, command...)
+	cmd := exec.CommandContext(ctx, "ipmitool", args...)
+
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "IPMITOOL_PASSWORD=") || strings.HasPrefix(kv, "IPMI_PASSWORD=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	cmd.Env = append(env, "IPMITOOL_PASSWORD="+pass)
+	return cmd
+}
+
+// ptySupported reports whether creack/pty can start processes here; it has
+// no Windows implementation.
+var ptySupported = runtime.GOOS != "windows"
+
+// runIPMIPrompted runs an ipmitool command that reads secrets interactively
+// (getpass on /dev/tty), answering each prompt in turn, so the secrets never
+// appear in argv. It runs in a pty because getpass needs a controlling
+// terminal. Each answer is written only once its prompt has appeared:
+// getpass flushes pending tty input (TCSAFLUSH) before printing the prompt,
+// so an answer written early would be discarded. Checked in source: glibc
+// misc/getpass.c, and Apple Libc gen/FreeBSD/readpassphrase.c (macOS
+// getpass wraps readpassphrase) — both flush, then prompt.
+func runIPMIPrompted(
+	host, user, pass string,
+	timeout time.Duration,
+	answers []string,
+	command ...string,
+) (string, error) {
+	if !ptySupported {
+		// No pty here (creack/pty has no Windows/ConPTY support), so getpass
+		// would have no terminal. Pass the answer as the final argument
+		// instead — on this platform only, as every platform did before
+		// prompted input existed. Checked before taking the host lock,
+		// which runIPMICommand takes itself.
+		return runIPMICommand(host, user, pass, timeout, append(command, answers[0])...)
+	}
+
+	defer wipeString(&pass)
+	defer lockHost(host)()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := ipmitoolCmd(ctx, host, user, pass, command...)
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		return "", fmt.Errorf("ipmitool: %w", err)
+	}
+
+	// Reader: ends with EIO once ipmitool exits and the slave side closes.
+	var (
+		mu  sync.Mutex
+		out bytes.Buffer
+	)
+	more := make(chan struct{}, 1)
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		buf := make([]byte, 1024)
+		for {
+			n, err := ptmx.Read(buf)
+			if n > 0 {
+				mu.Lock()
+				out.Write(buf[:n])
+				mu.Unlock()
+				select {
+				case more <- struct{}{}:
+				default:
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	output := func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return out.String()
+	}
+
+	// ipmitool prompts "Password for user N: " for each answer. waitPrompts
+	// reports whether n prompts have appeared; false if ipmitool exited or
+	// the timeout passed first.
+	waitPrompts := func(n int) bool {
+		for strings.Count(output(), "assword") < n {
+			select {
+			case <-more:
+			case <-readDone:
+				return strings.Count(output(), "assword") >= n
+			case <-ctx.Done():
+				return false
+			}
+		}
+		return true
+	}
+	for i, ans := range answers {
+		if !waitPrompts(i + 1) {
+			break
+		}
+		_, _ = io.WriteString(ptmx, ans+"\n")
+	}
+
+	waitErr := cmd.Wait()
+	<-readDone
+	_ = ptmx.Close()
+
+	if waitErr != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("ipmitool timed out after %v — BMC may be slow or unreachable", timeout)
+		}
+		return "", fmt.Errorf("ipmitool: %s", lastLine(output()))
+	}
+	return output(), nil
+}
+
+// lastLine returns the last non-blank line of s.
+func lastLine(s string) string {
+	lines := strings.Split(strings.ReplaceAll(s, "\r", ""), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if l := strings.TrimSpace(lines[i]); l != "" {
+			return l
+		}
+	}
+	return "unknown error"
 }
 
 func GetMCInfo(host, user, pass string) (*MCInfo, error) {
@@ -171,14 +310,9 @@ func SOLDeactivate(host, user, pass string) error {
 // The TUI runs it inside a pty (see solPane) and renders its output itself;
 // the user disconnects with F10, which ends ipmitool via its escape sequence
 // or SIGINT (see solPane.shutdown) so the BMC-side session is released.
-// Credentials appear in the process argument list — this is an ipmitool
-// limitation shared by all other commands in this package.
+// The password travels in the environment, not argv (see ipmitoolCmd).
 func SOLCmd(host, user, pass string) *exec.Cmd {
-	return exec.Command("ipmitool",
-		"-I", "lanplus",
-		"-H", host,
-		"-U", user,
-		"-P", pass,
+	return ipmitoolCmd(context.Background(), host, user, pass,
 		"-e", string([]byte{SOLEscapeChar}),
 		"sol", "activate",
 	)
@@ -339,39 +473,56 @@ func parseSDR(data string) []SDREntry {
 	return entries
 }
 
-// parseSEL parses "ipmitool sel list" pipe-delimited output:
-// ID | Date | Time | Sensor | Event | Direction
+// parseSEL parses "ipmitool sel list" pipe-delimited output. Record shapes,
+// from ipmitool 1.8.18 lib/ipmi_sel.c (ipmi_sel_print_std_entry):
+//
+//	standard:    ID | Date | Time | Sensor | Description | Direction
+//	  threshold/ECC events add a field:  ... | Direction | Reading 47 > Threshold 45 degrees C
+//	  pre-init timestamps:               ID |  Pre-Init  |0000000012| Sensor | ...
+//	OEM, timestamped (0xC0–0xDF):        ID | Date | Time | OEM record c1 | Manufacturer | Data
+//	OEM, no timestamp (0xE0–0xFF):       ID | OEM record e0 | Data
+//	kernel panic (0xF0):                 ID | Linux kernel panic: ...
+//
+// Every shape keeps its ID; extra detail goes into Event so Direction stays
+// exactly "Asserted"/"Deasserted" for colouring.
 func parseSEL(data string) []SELEntry {
-
 	var entries []SELEntry
-
 	for _, line := range strings.Split(data, "\n") {
-
-		parts := strings.SplitN(line, "|", 6)
-
-		if len(parts) < 5 {
+		raw := strings.Split(line, "|")
+		if len(raw) < 2 {
 			continue
 		}
-
-		id := strings.TrimSpace(parts[0])
-
+		parts := make([]string, len(raw))
+		for i, p := range raw {
+			parts[i] = strings.TrimSpace(p)
+		}
+		id := parts[0]
 		if id == "" {
 			continue
 		}
-
-		direction := ""
-		if len(parts) == 6 {
-			direction = strings.TrimSpace(parts[5])
+		e := SELEntry{ID: id}
+		switch {
+		case len(parts) == 2: // kernel panic
+			e.Event = parts[1]
+		case strings.HasPrefix(parts[1], "OEM record"): // OEM, no timestamp
+			e.Event = parts[1] + ": " + strings.Join(parts[2:], " ")
+		case len(parts) >= 5 && strings.HasPrefix(parts[3], "OEM record"): // OEM, timestamped
+			e.Timestamp = parts[1] + " " + parts[2]
+			e.Event = parts[3] + ": " + strings.Join(parts[4:], " ")
+		case len(parts) >= 5: // standard
+			e.Timestamp = parts[1] + " " + parts[2]
+			e.Event = parts[3] + ": " + parts[4]
+			if len(parts) >= 6 {
+				e.Direction = parts[5]
+			}
+			if len(parts) >= 7 {
+				e.Event += " (" + strings.Join(parts[6:], " ") + ")"
+			}
+		default:
+			continue
 		}
-
-		entries = append(entries, SELEntry{
-			ID:        id,
-			Timestamp: strings.TrimSpace(parts[1]) + " " + strings.TrimSpace(parts[2]),
-			Event:     strings.TrimSpace(parts[3]) + ": " + strings.TrimSpace(parts[4]),
-			Direction: direction,
-		})
+		entries = append(entries, e)
 	}
-
 	return entries
 }
 
