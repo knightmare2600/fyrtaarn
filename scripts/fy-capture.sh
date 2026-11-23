@@ -30,12 +30,23 @@ for tool in ipmitool curl python3; do
   command -v "$tool" >/dev/null || { echo "missing: $tool" >&2; exit 1; }
 done
 
+# Fail fast on a wrong or empty address (e.g. an unset shell variable):
+# otherwise every call below waits out its own 20-30 s timeout.
+if ! timeout 5 bash -c "exec 3<>/dev/tcp/$ip/443" 2>/dev/null; then
+  echo "cannot reach '$ip' on port 443 (HTTPS) within 5 s; check the address" >&2
+  exit 1
+fi
+
 out=~/fyrtaarn-fixtures/$name
 mkdir -p "$out/ipmi" "$out/redfish"
 : > "$out/summary.txt"
 
 read -rsp "Password for $user@$ip: " pw
 echo
+if [ -z "$pw" ]; then
+  echo "no password given; nothing captured" >&2
+  exit 1
+fi
 export IPMITOOL_PASSWORD=$pw
 
 # curl config needs \ and " escaped inside a quoted value.
@@ -62,7 +73,7 @@ rf() {
   local mode=$1 path=$2
   local f
   f=$out/redfish/$(printf '%s' "$path" | sed 's#^/##; s#/$##; s#[/.]#_#g')$([ "$mode" = noauth ] && echo .noauth).json
-  local t0 code
+  local t0 code rc
   t0=$(now_ms)
   if [ "$mode" = auth ]; then
     code=$(curl -sk --max-time 30 -o "$f" -w '%{http_code}' \
@@ -70,7 +81,10 @@ rf() {
   else
     code=$(curl -sk --max-time 30 -o "$f" -w '%{http_code}' "https://$ip$path")
   fi
-  log "$(printf 'redfish %-6s %-60s http=%s %6d ms' "$mode" "$path" "$code" $(( $(now_ms) - t0 )))" >&2
+  rc=$?
+  # http=000 alone does not say why; curl's exit code does
+  # (7 refused, 28 timeout, 35 TLS handshake failed, 60 certificate).
+  log "$(printf 'redfish %-6s %-60s http=%s curl=%-3d %6d ms' "$mode" "$path" "$code" "$rc" $(( $(now_ms) - t0 )))" >&2
   echo "$f"
 }
 
