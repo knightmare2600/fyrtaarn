@@ -2,6 +2,7 @@ package redfish
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -92,5 +93,36 @@ func TestChassisSensorFields(t *testing.T) {
 	})
 	if len(pw) != 3 || pw[0].Value != "230 Volts" || pw[1].Name != "Power Consumption 1" || pw[1].Value != "89 Watts" || pw[2].Name != "PSU1 Output" {
 		t.Fatalf("power %+v", pw)
+	}
+}
+
+// TestResetManager uses the shapes of the captured iDRAC9 (only
+// GracefulRestart allowed) and iLO 5 (no list, HPE OEM actions beside it).
+func TestResetManager(t *testing.T) {
+	for _, c := range []struct {
+		name, mgr, wantType, wantBody string
+	}{
+		{"idrac", `{"Actions":{"#Manager.Reset":{"target":"/redfish/v1/Managers/1/Actions/Manager.Reset","ResetType@Redfish.AllowableValues":["GracefulRestart"]}}}`, "GracefulRestart", `{"ResetType":"GracefulRestart"}`},
+		{"ilo", `{"Actions":{"#Manager.Reset":{"target":"/redfish/v1/Managers/1/Actions/Manager.Reset"}},"Oem":{"Hpe":{"Actions":{"#HpeiLO.ResetToFactoryDefaults":{"target":"/redfish/v1/Managers/1/Actions/Oem/Hpe/HpeiLO.ResetToFactoryDefaults"}}}}}`, "", `{}`},
+	} {
+		var posts []string
+		var body string
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.URL.Path == "/redfish/v1/Managers":
+				_, _ = w.Write([]byte(`{"Members":[{"@odata.id":"/redfish/v1/Managers/1"}]}`))
+			case r.URL.Path == "/redfish/v1/Managers/1":
+				_, _ = w.Write([]byte(c.mgr))
+			case r.Method == http.MethodPost:
+				posts = append(posts, r.URL.Path)
+				b, _ := io.ReadAll(r.Body)
+				body = string(b)
+			}
+		}))
+		got, err := ResetManager(strings.TrimPrefix(srv.URL, "https://"), "u", "p")
+		srv.Close()
+		if err != nil || got != c.wantType || body != c.wantBody || len(posts) != 1 || posts[0] != "/redfish/v1/Managers/1/Actions/Manager.Reset" {
+			t.Errorf("%s: type %q body %s posts %v err %v", c.name, got, body, posts, err)
+		}
 	}
 }

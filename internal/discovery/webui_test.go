@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/knightmare2600/fyrtaarn/internal/quirks"
 )
 
 // The Quanta's GoAhead-Webs front page answers / with a 302 to
@@ -37,5 +39,26 @@ func TestProbeWebUI(t *testing.T) {
 	defer other.Close()
 	if got := probeWebUI(strings.TrimPrefix(other.URL, "https://")); got != "" {
 		t.Fatalf("unknown title gave %q", got)
+	}
+}
+
+// TestFingerprintAtScan checks a scan recognises the iLO 4's firmware from
+// its front page ETag, before any login.
+func TestFingerprintAtScan(t *testing.T) {
+	quirks.Reset()
+	t.Cleanup(quirks.Reset)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			w.Header().Set("ETag", `"00ce4159"`)
+			_, _ = w.Write([]byte("<html><title>iLO 4</title></html>"))
+			return
+		}
+		http.NotFound(w, r) // no Redfish
+	}))
+	defer srv.Close()
+	ip := strings.TrimPrefix(srv.URL, "https://")
+	rs := EnrichResults([]HostResult{{IP: ip, IsBMC: true}})
+	if rs[0].Fingerprint != "HP iLO 4, firmware 2.54" || !quirks.Has(ip, quirks.NoCipherSuiteList) {
+		t.Fatalf("fingerprint %q, quirks %v", rs[0].Fingerprint, quirks.For(ip))
 	}
 }

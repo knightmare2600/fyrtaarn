@@ -143,6 +143,9 @@ func (a *App) redfishScreenKey(k string) (tea.Model, tea.Cmd, bool) {
 	case "w":
 		m, c := a.openWebUI(host)
 		return m, c, true
+	case "k":
+		a.activeDialog = NewKnownIssuesDialog(host)
+		return a, nil, true
 	}
 	return a, nil, false
 }

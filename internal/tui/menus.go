@@ -82,6 +82,8 @@ func NewMenuBar() MenuBar {
 					{Label: "IPMI over LAN...", Accel: 'I', Action: "ipmi-lan"},
 					{Label: "Redfish view...", Accel: 'R', Action: "redfish-view"},
 					{Label: "SOL settings...", Accel: 'S', Action: "sol-settings"},
+					{Sep: true},
+					{Label: "Reset BMC (cold)...", Accel: 'B', Action: "bmc-reset"},
 				},
 			},
 			{

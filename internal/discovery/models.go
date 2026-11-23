@@ -28,4 +28,8 @@ type HostResult struct {
 	// front page (see probeWebUI), e.g. "AMI MegaRAC SP"; used for BMCs
 	// without Redfish.
 	WebUI string
+	// Fingerprint names the firmware build recognised from the web front
+	// page's ETag (internal/quirks Fingerprints), e.g. "HP iLO 4, firmware
+	// 2.54"; known before any login.
+	Fingerprint string
 }

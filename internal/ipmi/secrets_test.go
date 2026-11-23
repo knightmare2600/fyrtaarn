@@ -250,3 +250,10 @@ func TestSOLSetCommands(t *testing.T) {
 		t.Fatal("user ID 0 accepted")
 	}
 }
+
+func TestColdResetCommand(t *testing.T) {
+	dir := fakeIPMITool(t)
+	if err := ColdResetBMC("10.9.9.6", "u", "p"); err != nil || !strings.HasSuffix(readFile(t, filepath.Join(dir, "argv")), "\x00mc\x00reset\x00cold") {
+		t.Fatalf("%v %q", err, readFile(t, filepath.Join(dir, "argv")))
+	}
+}

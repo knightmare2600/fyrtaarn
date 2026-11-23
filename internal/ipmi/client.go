@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/knightmare2600/fyrtaarn/internal/ptyproc"
+	"github.com/knightmare2600/fyrtaarn/internal/quirks"
 )
 
 const (
@@ -48,9 +50,10 @@ const noCipherListMarker = "Unable to Get Channel Cipher Suites"
 
 // noSuiteMarker is the open-session refusal for a suite the BMC will not
 // use. ipmitool 1.8.19+ picks the best suite from the BMC's list when no -C
-// is given; on the Quanta in Tested Hardware (AMI, FW 7.54) that pick is
-// refused although "channel getciphers" lists only suites 0-3 and 6-8, and
-// -C 3 works. Such hosts are retried once with -C 3 and kept on it.
+// is given; on the Quanta in Tested Hardware (AMI, FW 7.54) that pick,
+// suite 17, is refused although the BMC lists it ("channel getciphers"
+// shows 0-3, 6-8, 11, 12 and 15-17), and -C 3 works. Such hosts are retried
+// once with -C 3 and kept on it.
 const noSuiteMarker = "no matching cipher suite"
 
 var suite3Hosts sync.Map
@@ -58,7 +61,17 @@ var suite3Hosts sync.Map
 func noteCipherFallback(host, output string) {
 	if strings.Contains(output, noCipherListMarker) {
 		suite3Hosts.Store(host, struct{}{})
+		quirks.Learn(host, quirks.NoCipherSuiteList)
 	}
+}
+
+// wantSuite3 reports whether host is to get -C 3: learned at run time, or
+// known from its identity (internal/quirks).
+func wantSuite3(host string) bool {
+	if _, ok := suite3Hosts.Load(host); ok {
+		return true
+	}
+	return quirks.Has(host, quirks.NoCipherSuiteList) || quirks.Has(host, quirks.RefusesAutoCipherSuite)
 }
 
 func runIPMICommand(
@@ -98,7 +111,7 @@ func runIPMIKeepOutput(
 	var stdout, stderr bytes.Buffer
 	var err error
 	for attempt := 0; attempt < 2; attempt++ {
-		_, suite3 := suite3Hosts.Load(host)
+		suite3 := wantSuite3(host)
 		stdout.Reset()
 		stderr.Reset()
 		cmd := ipmitoolCmd(ctx, host, user, pass, command...)
@@ -112,6 +125,7 @@ func runIPMIKeepOutput(
 			break
 		}
 		suite3Hosts.Store(host, struct{}{})
+		quirks.Learn(host, quirks.RefusesAutoCipherSuite)
 	}
 
 	if err != nil {
@@ -137,7 +151,7 @@ func ipmitoolCmd(ctx context.Context, host, user, pass string, command ...string
 		"-U", user,
 		"-E",
 	}
-	if _, ok := suite3Hosts.Load(host); ok {
+	if wantSuite3(host) {
 		args = append(args, "-C", "3")
 	}
 	args = append(args, command...)
@@ -407,6 +421,11 @@ func parseMCInfo(data string) *MCInfo {
 			info.ManufacturerName = value
 		case "Product Name":
 			info.ProductName = value
+		case "Manufacturer ID":
+			info.ManufacturerID, _ = strconv.Atoi(strings.Fields(value + " 0")[0])
+		case "Product ID":
+			// "8192 (0x2000)"
+			info.ProductID, _ = strconv.Atoi(strings.Fields(value + " 0")[0])
 		}
 	}
 

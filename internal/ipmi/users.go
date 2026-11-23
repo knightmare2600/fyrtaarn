@@ -168,22 +168,24 @@ func parseUserList(data string) []UserEntry {
 			continue
 		}
 
-		var name, callinF, linkF, ipmiF, privilege string
-
-		f1 := strings.ToLower(fields[1])
-		if f1 == "true" || f1 == "false" {
-			// Name column is absent: ID Callin Link IPMI Priv...
-			callinF, linkF, ipmiF = fields[1], fields[2], fields[3]
-			privilege = strings.Join(fields[4:], " ")
-		} else {
-			// Name column is present: ID Name Callin Link IPMI Priv...
-			if len(fields) < 6 {
-				continue
+		// Columns: ID, name, Callin, Link Auth, IPMI Msg, privilege. The name
+		// may be empty or contain spaces (iLO 5 names unused slots
+		// "(Empty User)"), so locate the three true/false columns and take
+		// the name as everything between the ID and them.
+		isBool := func(s string) bool { return strings.EqualFold(s, "true") || strings.EqualFold(s, "false") }
+		b := -1
+		for i := 1; i+3 < len(fields); i++ {
+			if isBool(fields[i]) && isBool(fields[i+1]) && isBool(fields[i+2]) {
+				b = i
+				break
 			}
-			name = fields[1]
-			callinF, linkF, ipmiF = fields[2], fields[3], fields[4]
-			privilege = strings.Join(fields[5:], " ")
 		}
+		if b < 0 {
+			continue
+		}
+		name := strings.Join(fields[1:b], " ")
+		callinF, linkF, ipmiF := fields[b], fields[b+1], fields[b+2]
+		privilege := strings.Join(fields[b+3:], " ")
 
 		entries = append(entries, UserEntry{
 			ID:            id,

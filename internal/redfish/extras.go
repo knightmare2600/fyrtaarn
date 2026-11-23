@@ -1,10 +1,13 @@
 package redfish
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
 	"strings"
+
+	"github.com/knightmare2600/fyrtaarn/internal/quirks"
 )
 
 // Event log, user accounts and firmware inventory over Redfish, for BMCs
@@ -27,11 +30,38 @@ type LogEntry struct {
 	Message  string
 }
 
+// ErrILO4Logs is returned instead of reading log entries on iLO 4.
+// The cause is in GetEventLogs' comment; the message is kept short for the
+// status bar.
+var ErrILO4Logs = errors.New("skipped on iLO 4 (reading it stalled an iLO 4's web server); use [L] on BMC Info (IPMI)")
+
+// observeManagers records the managers' firmware strings ("iLO 4 v2.54")
+// with internal/quirks, so it can be asked about host.
+func observeManagers(c *http.Client, host, base, user, pass string) {
+	col, err := fetchJSON(c, base+"/redfish/v1/Managers", user, pass)
+	if err != nil {
+		return
+	}
+	for _, p := range collectionPaths(col) {
+		if m, err := fetchJSON(c, base+p, user, pass); err == nil {
+			if fw := firstStr(m, "FirmwareVersion"); fw != "" {
+				quirks.Observe(host, quirks.Identity{RedfishFirmware: fw})
+			}
+		}
+	}
+}
+
 // GetEventLogs reads the first page of every log service under Systems
-// and Managers, newest first.
+// and Managers, newest first. Not on iLO 4: the first request for its IML
+// entries stalled an iLO 4 2.54 (ProLiant ML310e Gen8 v2) so that its web
+// server answered nothing for minutes, on a production box.
 func GetEventLogs(host, user, pass string) ([]LogEntry, error) {
 	c := httpClient()
 	base := "https://" + host
+	observeManagers(c, host, base, user, pass)
+	if quirks.Has(host, quirks.RedfishLogEntriesStall) {
+		return nil, ErrILO4Logs
+	}
 	var out []LogEntry
 	found := false
 	for _, col := range []string{"/redfish/v1/Systems", "/redfish/v1/Managers"} {
@@ -157,8 +187,7 @@ func GetAccounts(host, user, pass string) ([]Account, error) {
 		if name == "" {
 			continue
 		}
-		en, _ := a["Enabled"].(bool)
-		lk, _ := a["Locked"].(bool)
+		en, lk := accountState(a)
 		out = append(out, Account{ID: firstStr(a, "Id"), UserName: name, Role: firstStr(a, "RoleId"), Enabled: en, Locked: lk})
 	}
 	return out, nil
@@ -198,4 +227,25 @@ func GetFirmware(host, user, pass string) ([]Firmware, error) {
 		out = append(out, Firmware{ID: firstStr(f, "Id"), Name: firstStr(f, "Name"), Version: firstStr(f, "Version")})
 	}
 	return out, nil
+}
+
+// accountState reads whether an account is enabled and locked. iLO 5 (FW
+// 1.40) sends neither Enabled nor Locked; whether the account may log in is
+// HPE's Oem.Hpe.Privileges.LoginPriv. With neither, a named account is
+// taken as enabled: BMCs list named accounts because they exist.
+func accountState(a map[string]any) (enabled, locked bool) {
+	locked, _ = a["Locked"].(bool)
+	if en, ok := a["Enabled"].(bool); ok {
+		return en, locked
+	}
+	if oem, ok := a["Oem"].(map[string]any); ok {
+		if hpe, ok := oem["Hpe"].(map[string]any); ok {
+			if pr, ok := hpe["Privileges"].(map[string]any); ok {
+				if login, ok := pr["LoginPriv"].(bool); ok {
+					return login, locked
+				}
+			}
+		}
+	}
+	return true, locked
 }

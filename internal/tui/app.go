@@ -18,6 +18,7 @@ import (
 	"github.com/knightmare2600/fyrtaarn/internal/export"
 	"github.com/knightmare2600/fyrtaarn/internal/ipmi"
 	"github.com/knightmare2600/fyrtaarn/internal/misc"
+	"github.com/knightmare2600/fyrtaarn/internal/quirks"
 	"github.com/knightmare2600/fyrtaarn/internal/redfish"
 	"github.com/knightmare2600/fyrtaarn/internal/session"
 	"github.com/knightmare2600/fyrtaarn/internal/util"
@@ -205,6 +206,9 @@ type App struct {
 	// is about (solcfg.go).
 	solCfgHost   string
 	solCfgUserID int
+
+	// bmcResetHost: the host the BMC reset confirmation is about.
+	bmcResetHost string
 
 	// mouseReleased is true while mouse reporting is off (see syncMouse).
 	mouseReleased bool
@@ -880,6 +884,9 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.host.WebUI != "" {
 				r.WebUI = msg.host.WebUI
 			}
+			if msg.host.Fingerprint != "" {
+				r.Fingerprint = msg.host.Fingerprint
+			}
 		}
 		vendor := msg.host.RedfishManufacturer
 		if vendor == "" {
@@ -936,6 +943,9 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		a.redfishOnly = false
+		if len(a.results) > 0 && a.selectedHost >= 0 {
+			observeMCInfo(a.results[a.selectedHost].IP, msg.Info)
+		}
 		a.mcInfo = msg.Info
 		a.lanInfo = msg.LAN
 		a.chassis = msg.Chassis
@@ -1092,6 +1102,9 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.redfishEnum = msg.Result
+		if len(a.results) > 0 && a.selectedHost >= 0 {
+			observeRedfish(a.results[a.selectedHost].IP, msg.Result)
+		}
 		a.redfishOffset = 0
 		a.currentScreen = screenRedfish
 		a.status = fmt.Sprintf("Redfish: %d system(s), %d manager(s)",
@@ -1244,6 +1257,9 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case solCfgMsg:
 		return a.handleSOLCfg(msg)
+
+	case bmcResetMsg:
+		return a.handleBMCReset(msg)
 
 	case rfLogMsg:
 		return a.handleRFLog(msg)
@@ -1449,6 +1465,8 @@ func (a *App) handleMenuAction(action string) (tea.Model, tea.Cmd) {
 		return a.openRedfishView()
 	case action == "sol-settings":
 		return a.openSOLSettings()
+	case action == "bmc-reset":
+		return a.openBMCReset()
 	case action == "connect-bmc-dialog":
 		a.activeDialog = NewConnectBMCDialog("", a.username)
 		return a, textinput.Blink
@@ -1524,6 +1542,9 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 		a.activeDialog = nil
 		return a.openRedfishView()
 
+	case "bmc-reset-confirm":
+		return a.confirmBMCReset()
+
 	case "ipmilan-on", "ipmilan-off":
 		a.activeDialog = nil
 		on := action == "ipmilan-on"
@@ -1540,7 +1561,7 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.lmediaPath = expandHome(input)
-		a.activeDialog = NewLMediaWarningDialog(a.lmediaPath)
+		a.activeDialog = NewLMediaWarningDialog(a.lmediaPath, quirks.Has(a.results[a.selectedHost].IP, quirks.LMediaRegisterFails))
 		return a, nil
 
 	case "vm-upload-confirm":
@@ -2187,6 +2208,13 @@ func (a *App) updateMCInfo(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return a.openWebUI(a.results[a.selectedHost].IP)
 
+	case "k":
+		if len(a.results) == 0 {
+			return a, nil
+		}
+		a.activeDialog = NewKnownIssuesDialog(a.results[a.selectedHost].IP)
+		return a, nil
+
 	case "u":
 		if len(a.results) == 0 {
 			return a, nil
@@ -2748,6 +2776,9 @@ func (a *App) renderResults() string {
 			if h.WebUI != "" {
 				b.WriteString(fmt.Sprintf("     ├─ web UI:     %s\n", h.WebUI))
 			}
+			if h.Fingerprint != "" {
+				b.WriteString(fmt.Sprintf("     ├─ firmware:   %s (web fingerprint)\n", h.Fingerprint))
+			}
 			if h.HasRedfish {
 				b.WriteString(fmt.Sprintf("     ├─ redfish:    v%s\n", h.RedfishVersion))
 				if h.RedfishManufacturer != "" || h.RedfishModel != "" {
@@ -2881,7 +2912,7 @@ func (a *App) screenStatusHint() string {
 		return hint
 
 	case screenMCInfo:
-		return "[S] Sensors  [L] Log  [F] FRU  [U] Users  [C] Compliance  [R] Redfish  [P] Power  [O] SOL  [V] Virtual Media  [W] Web UI  [ESC] Back"
+		return "[S] Sensors  [L] Log  [F] FRU  [U] Users  [C] Compliance  [R] Redfish  [P] Power  [O] SOL  [V] Virtual Media  [W] Web UI  [K] Issues  [ESC] Back"
 
 	case screenSensor:
 		total := len(a.sensors)
@@ -2946,7 +2977,7 @@ func (a *App) screenStatusHint() string {
 		return "[F10] Disconnect  [PgUp] Scroll up  — all other keys forwarded to BMC"
 
 	case screenRedfish:
-		return "[S] Sensors  [L] Log  [U] Users  [F] Firmware  [P] Power  [V] Virtual Media  [W] Web UI  (Redfish)  [ESC] Back"
+		return "[S] Sensors  [L] Log  [U] Users  [F] Firmware  [P] Power  [V] Virtual Media  [W] Web UI  [K] Issues  [ESC] Back"
 
 	}
 

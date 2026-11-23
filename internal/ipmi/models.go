@@ -6,6 +6,8 @@ type MCInfo struct {
 	IPMIVersion      string
 	ManufacturerName string
 	ProductName      string
+	ManufacturerID   int // IANA enterprise number, e.g. 11 (HP)
+	ProductID        int // e.g. 8192 from "8192 (0x2000)"
 }
 
 type LANInfo struct {

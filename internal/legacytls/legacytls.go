@@ -25,6 +25,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/knightmare2600/fyrtaarn/internal/quirks"
 )
 
 // Info describes a negotiated connection.
@@ -154,6 +156,7 @@ func Dial(ctx context.Context, network, addr string) (Conn, error) {
 	}
 	_ = raw.SetDeadline(time.Time{})
 	fallbackHosts.Store(addr, struct{}{})
+	quirks.Learn(host, quirks.LegacyTLSOnly)
 	return c, nil
 }
 

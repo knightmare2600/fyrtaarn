@@ -43,6 +43,8 @@ func TestParseMCInfoIDRAC9(t *testing.T) {
 		IPMIVersion:      "2.0",
 		ManufacturerName: "Dell Inc.",
 		ProductName:      "Unknown (0x100)",
+		ManufacturerID:   674,
+		ProductID:        256,
 	}
 	if *got != want {
 		t.Errorf("parseMCInfo:\n got %+v\nwant %+v", *got, want)
@@ -336,5 +338,31 @@ func TestParseSOLInfo(t *testing.T) {
 		if got := parsePayloadStatus(in); got != want {
 			t.Errorf("%q: got %q", in, got)
 		}
+	}
+}
+
+// TestUserListNamesWithSpaces checks names with spaces, as iLO 5 (FW 1.40)
+// prints for unused slots, do not shift the columns after them.
+func TestUserListNamesWithSpaces(t *testing.T) {
+	out := "ID  Name\t     Callin  Link Auth\tIPMI Msg   Channel Priv Limit\n" +
+		"1                    true    false      false      NO ACCESS\n" +
+		"2   Administrator    true    false      true       ADMINISTRATOR\n" +
+		"3   (Empty User)     true    false      true       NO ACCESS\n" +
+		"4   ops team         true    true       true       OPERATOR\n"
+	us := parseUserList(out)
+	if len(us) != 4 {
+		t.Fatalf("got %d users: %+v", len(us), us)
+	}
+	want := []struct {
+		name, priv string
+		enabled    bool
+	}{{"", "NO ACCESS", false}, {"Administrator", "ADMINISTRATOR", true}, {"(Empty User)", "NO ACCESS", false}, {"ops team", "OPERATOR", true}}
+	for i, w := range want {
+		if us[i].Name != w.name || us[i].Privilege != w.priv || us[i].Enabled != w.enabled {
+			t.Errorf("user %d: got %+v want %+v", i+1, us[i], w)
+		}
+	}
+	if !us[1].IPMIEnabled || us[0].IPMIEnabled || !us[3].LinkEnabled {
+		t.Errorf("flags: %+v", us)
 	}
 }

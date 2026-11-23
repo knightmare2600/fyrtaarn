@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/knightmare2600/fyrtaarn/internal/legacytls"
+
+	"github.com/knightmare2600/fyrtaarn/internal/quirks"
 )
 
 // EnrichResults runs reverse DNS and Redfish probing concurrently after nmap
@@ -46,12 +48,20 @@ func EnrichResults(results []HostResult) []HostResult {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
+			// The front page: one GET of "/", for the web UI's name (by
+			// title) and the firmware build (by ETag).
+			ui, etag := probeFrontPage(results[i].IP)
+			if fp, ok := quirks.FromETag(etag); ok {
+				results[i].Fingerprint = fp.BMC
+				quirks.Observe(results[i].IP, fp.Identity)
+			}
 			rf, ok := probeRedfish(results[i].IP)
 			if !ok {
-				// No Redfish: try to recognise the web UI instead, so
-				// older BMCs still get a name.
-				if ui := probeWebUI(results[i].IP); ui != "" {
+				// No Redfish: the recognised web UI still gives older
+				// BMCs a name.
+				if ui != "" {
 					results[i].WebUI = ui
+					quirks.Observe(results[i].IP, quirks.Identity{WebUI: ui})
 					if results[i].Vendor == "" {
 						results[i].Vendor = ui
 					}
@@ -180,16 +190,24 @@ var webUITitles = map[string]string{
 
 var titleRE = regexp.MustCompile(`(?is)<title>\s*(.*?)\s*</title>`)
 
-// probeWebUI fetches the BMC's HTTPS front page (old TLS included, through
-// the same client as the Redfish probe) and names the firmware from its
-// title, following redirects (the Quanta answers / with a 302 to
-// /index.html). Unrecognised or unreachable gives "".
+// probeWebUI names the web UI from the front page's title; "" if
+// unrecognised or unreachable.
 func probeWebUI(ip string) string {
+	ui, _ := probeFrontPage(ip)
+	return ui
+}
+
+// probeFrontPage fetches the BMC's HTTPS front page once (old TLS included,
+// through the same client as the Redfish probe), following redirects (the
+// Quanta answers / with a 302 to /index.html, iDRAC9 into /restgui/), and
+// returns the web UI named from its title and the final page's ETag.
+func probeFrontPage(ip string) (ui, etag string) {
 	resp, err := redfishClient().Get("https://" + ip + "/")
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	defer resp.Body.Close()
+	etag = resp.Header.Get("ETag")
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if resp.Header.Get("Content-Encoding") == "gzip" {
 		if zr, err := gzip.NewReader(bytes.NewReader(body)); err == nil {
@@ -198,7 +216,7 @@ func probeWebUI(ip string) string {
 	}
 	m := titleRE.FindSubmatch(body)
 	if m == nil {
-		return ""
+		return "", etag
 	}
-	return webUITitles[strings.ToLower(string(m[1]))]
+	return webUITitles[strings.ToLower(string(m[1]))], etag
 }

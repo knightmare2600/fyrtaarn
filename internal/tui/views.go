@@ -31,6 +31,7 @@ func (a *App) renderMCInfo() string {
 		if len(a.results) > 0 && a.selectedHost >= 0 && a.results[a.selectedHost].RedfishModel != "" {
 			b.WriteString(fmt.Sprintf("  %-24s %s\n", "Model:", a.results[a.selectedHost].RedfishModel))
 		}
+		b.WriteString(knownIssuesLine(hostIP))
 		b.WriteString("\n")
 	}
 

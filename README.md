@@ -97,6 +97,7 @@ The name reflects the project's purpose: visibility, remote control, and infrast
 - **Web UI proxy** — `[W]` from the results list or BMC Info serves the selected BMC's HTTPS web interface on `http://127.0.0.1:<port>/`, so any modern browser can use it, however old the BMC's TLS. No old OpenSSL, VM or container is needed: fyrtaarn makes the BMC connection itself (see Legacy TLS below). The dialog shows the local URL, the TLS version and cipher negotiated with the BMC (with a warning when it is obsolete), and the `ssh -L` line to use when fyrtaarn runs on another machine. Absolute redirects and links back to the BMC are rewritten to the local address; cookies lose `Secure`/`Domain` so the browser keeps the login session over local HTTP. Listens on localhost only; one proxy per BMC, running until Stop Proxy or exit. Java KVM consoles connect to their own ports directly and are not proxied
 - **Legacy TLS** — every HTTPS connection fyrtaarn makes to a BMC (Redfish, scan enrichment, web UI proxy) accepts TLS 1.0 and 1.1 and the old CBC, 3DES and RC4-SHA suites through Go's TLS library, and falls back to a built-in TLS 1.0/1.1 RC4-MD5/RC4-SHA client for BMCs Go cannot reach at all, such as 2009-era AMI MegaRAC SP firmware whose only usable suite is RC4-MD5. Modern BMCs still negotiate TLS 1.3/1.2 as before. Certificates are not verified, as before (BMCs use self-signed certificates)
 - **IPMI over LAN on/off** — when a connect fails with no IPMI session and the BMC has Redfish, fyrtaarn checks the BMC's Redfish `NetworkProtocol` resource; if IPMI over LAN is switched off it says so and offers to switch it on (default Cancel), then retries the connect. BMC > IPMI over LAN... shows the selected host's current state and switches it either way. The change is a Redfish `PATCH` of `IPMI.ProtocolEnabled`, read back afterwards: a BMC that accepts it but keeps the old value is reported as a failure. The dialog notes IPMI 2.0's password-hash exposure (CVE-2013-4786)
+- **Reset BMC (cold)** — BMC > Reset BMC (cold)... restarts the management controller only, over IPMI (`mc reset cold`) or, in Redfish-only mode, the standard Redfish `Manager.Reset` (never vendor actions such as HPE's ResetToFactoryDefaults beside it). The dialog states that the server keeps running, settings are kept, the BMC is unreachable for one to three minutes and open sessions to it are cut, and the BMC's address must be typed to confirm; Enter in the address box moves to Cancel, not Reset. fyrtaarn closes its own virtual drive and web UI proxy to that BMC first. Recovers a BMC whose web server has stalled, as the iLO 4 under Known Issues did
 - **SOL settings** — BMC > SOL settings... shows whether the BMC offers SOL, its bit rate and required privilege, and whether the logged-in user may use SOL, and offers to switch SOL on or off and to allow the user (Cancel focused). Uses channel 14 ("this channel"), so no per-vendor LAN channel number. The server must still redirect its console to the BMC's serial port in its own BIOS/UEFI setup, which differs by vendor; the dialog says so rather than guessing. Reading checked on the Quanta; the changes are untested on hardware
 - **Redfish-only mode** — for a BMC with IPMI over LAN off, or none: BMC > Redfish view... (or Use Redfish only in the IPMI over LAN dialog, so IPMI can stay off) shows the system and manager details over Redfish, and from there `[S]` reads sensors from the Chassis Thermal and Power resources (temperatures, fans, voltages, power draw; absent parts skipped), `[P]` offers power actions from the BMC's own list of allowed reset types (never NMI; Cancel focused), `[L]` the event log (every Systems and Managers log service, first page each, newest first), `[U]` user accounts (shown read-only: their IDs are not IPMI user IDs), `[F]` the firmware inventory, `[V]` virtual media and `[W]` the web UI. Checked against captured Redfish responses of an iDRAC9 4.20, an iLO 4 2.54 (whose fans use `FanName`/`CurrentReading`/`Units` instead of the standard names) and an iLO 5 1.40; the power actions are untested on hardware
 - **Direct connect** — File > Connect to BMC opens a dialog (IP, username, password) and connects without running a scan; host is added to the results tree so all subsequent operations work normally, and gets the same reverse-DNS and Redfish enrichment a scan gives it
@@ -216,8 +217,7 @@ The Quanta's web interface speaks TLS 1.0 at most, with NULL-MD5, RC4-MD5 and tw
 
 - Web UI proxy: login and authenticated pages work (built-in RC4-MD5 client).
 - Virtual media: Mount attaches an ISO through AMI media redirection (session accepted on port 5120, held, and released by Eject); a floppy image on port 5122 and a disk image on 5123 likewise, and a CD over TLS on 5124 with media encryption switched on (then switched back off). The server was powered off, so no sector reads have been observed yet.
-- LMedia (Upload to BMC): **fails** — the BMC accepts the upload but answers status -1 when asked to register it, for a formatted FAT12 floppy and for a valid ISO alike, and identically when the browser's own requests are replayed with curl.
-- Firmware bug: requesting `/Java/jviewer.jnlp` without the `EXTRNIP` query parameter the BMC's own page adds makes the BMC write `(null)` as its host and crashes its web server, which stays down until `ipmitool mc reset cold`. Fyrtaarn always sends `EXTRNIP`, and the web UI proxy rewrites it to the BMC's address.
+- LMedia (Upload to BMC) fails, and the BMC's own Java console launch file can crash its web server: see [Known Issues](#known-issues).
 
 HPE iLO 5 (ProLiant ML350 Gen10, FW 1.40), release 0.7.0, 2026-11-23: IPMI over LAN was switched off, so Redfish answered and IPMI never did. BMC > IPMI over LAN... switched it on over Redfish; the iLO's own web UI then showed it on, where it had been off, and fyrtaarn connected over IPMI. SOL not yet tried on this BMC.
 
@@ -233,6 +233,220 @@ tar czf fyrtaarn-fixtures.tgz -C ~ fyrtaarn-fixtures
 It is read-only — ipmitool read commands and Redfish GETs, nothing that changes BMC state — and runs one command at a time. It captures the IPMI output fyrtaarn parses, plus a Redfish walk of Systems, Managers (including VirtualMedia slots), Chassis sensors and SessionService, with timings, into `~/fyrtaarn-fixtures/<name>/`. The password is prompted for without echo and never written to disk or passed on a command line. The output does contain serial numbers, MAC and IP addresses, UUIDs and BMC user names: review or redact it before sharing publicly. Needs `ipmitool`, `curl` and `python3`.
 
 ---
+
+## Known Issues
+
+BMCs are embedded systems with long-lived firmware, and each has its own bugs. This section lists
+the ones fyrtaarn has run into on real hardware, what they look like from the outside, and what
+fyrtaarn does about each. Everything here was seen on a specific BMC and firmware version, and
+says so; where fyrtaarn applies a fix more widely than that, the entry says why.
+
+In fyrtaarn itself, BMC Info and the Redfish view show a **Known issues** line for any BMC with an
+entry below, and `[K]` lists them. The list lives in one place in the code, `internal/quirks`,
+and the table at the end of this section is generated from it.
+
+### How fyrtaarn recognises a BMC
+
+Fyrtaarn identifies a BMC from what it already learns while connecting, so no extra requests are
+made just to check for known issues:
+
+- IPMI `mc info`: the manufacturer ID, product ID and firmware revision (for example, HP iLO 4 is
+  manufacturer 11, product 0x2000; HPE iLO 5 is manufacturer 47196, product 0x2000).
+- The Redfish manager's firmware string, such as `iLO 4 v2.54`.
+- The web interface recognised during a scan, such as `AMI MegaRAC SP`.
+- The firmware build recognised from the web front page's ETag during a scan, before any login:
+  see [Firmware fingerprints](#firmware-fingerprints).
+
+Some issues can only be discovered by running into them, such as a BMC that refuses ipmitool's
+choice of cipher suite. Fyrtaarn detects those as they happen, works around them, and records them
+for that BMC for the rest of the session; `[K]` marks them "seen this session".
+
+### Firmware fingerprints
+
+A web server's `ETag` header identifies a version of a file, and many BMCs derive it from the
+firmware image rather than from each file. On both HP iLOs seen so far, every static file of the
+web interface carries one and the same ETag, and it differs between firmware builds. So the ETag
+of the front page alone identifies the firmware, without logging in.
+
+Fyrtaarn reads the front page's ETag during a scan (the same single request that also names the
+web interface) and, if it is a known one, treats the BMC as that firmware from then on: its known
+issues apply before the first login, so an iLO 4 2.54 gets `-C 3` on its very first IPMI command
+instead of after a ten-second delay. The scan's host details show the result as "firmware: ...
+(web fingerprint)".
+
+Dell's iDRAC9 works differently: its web server is Apache, which gives every file its own ETag
+in the form `"<size>-<modified>"`, both in hexadecimal. The size part differs per file, but the
+modified part is the same on every file of a firmware build, because they all carry the time the
+image was built. Fyrtaarn matches on that part. On the iDRAC9 below it is `5a50953d044c0`, which
+is 7 May 2020 06:52:43 UTC in microseconds, the same as every file's `Last-Modified` header; the
+size parts were checked against the files' actual sizes.
+
+An ETag only identifies a build that has been seen before, and different products could in
+principle share one, so each entry below records where it was taken. BMCs whose web server sends
+no ETag, such as the Quanta's GoAhead, are recognised by other means.
+
+| ETag | Firmware | Seen |
+|---|---|---|
+| `"00ce4159"` | HP iLO 4, firmware 2.54 | ProLiant ML310e Gen8 v2, 23 November 2026: the same ETag on `/`, `/favicon.ico` and `/css/eov_lteIE9.css` |
+| `5a50953d044c0` (after the dash) | Dell iDRAC9, firmware 4.20.20.20 | PowerEdge T140, 23 November 2026: on every file, e.g. `"99a-5a50953d044c0"` on the 2458-byte `/restgui/start.html` that `/` redirects to, which is what a scan reads |
+| `"00d2585c"` | HPE iLO 5, firmware 1.40 | ProLiant ML350 Gen10, 23 November 2026: the same ETag on `/`, `/favicon.ico` and `/images/app-icon.svg` |
+
+To add a BMC: fetch its front page and look at the `ETag` response header, for example with
+`curl -skI https://<bmc-address>/` (or `curl -sk -D - -o /dev/null` for BMCs that refuse HEAD, as
+the iLO 5 does), together with its firmware version from BMC Info.
+
+### HP iLO 4 (ProLiant Gen8; seen on firmware 2.54)
+
+**Redfish event log stalls the web server** (`redfish-log-entries-stall`)
+
+- *What you see:* the iLO's web interface stops loading and Redfish stops answering. IPMI, and the
+  server itself, carry on as normal.
+- *Cause:* requesting the Integrated Management Log (IML) entries over Redfish. The first such
+  request was never answered, and the iLO's web server then answered nothing at all, web pages
+  included, for at least 30 minutes. It did not recover on its own.
+- *What fyrtaarn does:* never requests Redfish log entries from an iLO 4, on any firmware. The
+  event log is read over IPMI instead (`[L]` on BMC Info), which is unaffected. This is applied to
+  all iLO 4 firmware, not only 2.54, because the cost of being wrong is a stalled iLO on a
+  production server.
+- *What you can do:* if an iLO 4's web interface has stalled, a cold reset of the iLO brings it
+  back without touching the server: see [Recovering a stalled BMC](#recovering-a-stalled-bmc).
+- *Evidence:* ProLiant ML310e Gen8 v2, iLO 4 2.54, on 23 November 2026, a production server.
+  Stalled at about 16:00 during a capture, still stalled at about 16:30, recovered by `mc reset cold`.
+
+**Every IPMI command takes ten seconds** (`no-cipher-suite-list`)
+
+- *What you see:* each IPMI action against the iLO 4 takes about ten seconds, where other BMCs
+  answer in under one.
+- *Cause:* ipmitool 1.8.19 and later first asks the BMC which cipher suites it supports. The iLO 4
+  never answers that question, and ipmitool waits about ten seconds before falling back to suite 3,
+  on every command. Older ipmitool versions do not ask, so they are not affected.
+- *What fyrtaarn does:* after the first such delay, passes `-C 3` to ipmitool for that BMC, which is
+  the suite ipmitool would have ended up on anyway. Once the BMC is recognised as an iLO 4 2.54,
+  `-C 3` is used from the first command.
+- *What you can do:* nothing. If you run ipmitool by hand against an iLO 4, add `-C 3`.
+- *Evidence:* captures of the ML310e above, 23 November 2026: every command took 10.2–10.8 seconds
+  without `-C 3`.
+
+### HPE iLO 5 (ProLiant Gen10; seen on firmware 1.40)
+
+**IPMI over LAN was switched off** (`ipmi-over-lan-was-off`)
+
+- *What you see:* connecting fails with "Unable to establish IPMI v2 / RMCP+ session" after about
+  twenty seconds, although the iLO's web interface and Redfish work.
+- *Cause:* the iLO's "IPMI/DCMI over LAN" setting was off, so the iLO ignores IPMI entirely. Whether
+  this is HPE's factory default is not established.
+- *What fyrtaarn does:* when a connect fails this way and the BMC has Redfish, fyrtaarn asks it over
+  Redfish whether IPMI over LAN is off, and if so offers to switch it on, with a note about IPMI's
+  password-hash weakness (CVE-2013-4786). BMC > IPMI over LAN... checks or switches it at any time.
+  If you would rather leave IPMI off, BMC > Redfish view... manages the BMC over Redfish alone.
+- *Evidence:* ProLiant ML350 Gen10, iLO 5 1.40, 23 November 2026; switched on through fyrtaarn, and
+  the change confirmed in the iLO's own web interface.
+
+**Redfish accounts have no "enabled" field** (`accounts-no-enabled-field`)
+
+- *What you see:* nothing now. Before 0.8.1, every account in the Redfish view showed as disabled.
+- *Cause:* iLO 5 leaves out the standard `Enabled` and `Locked` fields of a Redfish account. Whether
+  an account may log in is in HPE's own `Oem.Hpe.Privileges.LoginPriv` instead.
+- *What fyrtaarn does:* uses `LoginPriv` when `Enabled` is missing.
+- *Evidence:* capture of the ML350 Gen10 above, 23 November 2026.
+
+### Quanta server with AMI MegaRAC SP (no Redfish; seen on firmware 7.54)
+
+This BMC is sold as a Supermicro BMC; IPMI reports manufacturer 7244 (Quanta), product 0x3252.
+Its web interface dates from 2009 and its firmware build from 2013.
+
+**Asking for the Java console the wrong way crashes the web server** (`jnlp-needs-extrnip`)
+
+- *What you see:* the web interface goes dead and stays dead; IPMI keeps working.
+- *Cause:* the Java console's launch file, `/Java/jviewer.jnlp`, is generated on request. The BMC's
+  own web page asks for it with an `EXTRNIP` parameter giving the BMC's address. Asked for without
+  it, the firmware builds the file around a missing address, writes `(null)` in its place, and its
+  web server crashes partway through the reply. It stays down until the BMC is reset.
+- *What fyrtaarn does:* always includes `EXTRNIP` when it asks for the file, which it does to start
+  virtual media. The web UI proxy rewrites `EXTRNIP` to the BMC's real address, so the Java console
+  works through the proxy as well.
+- *What you can do:* if the web interface has died, see [Recovering a stalled BMC](#recovering-a-stalled-bmc).
+- *Evidence:* the Quanta under Tested Hardware, 23 November 2026, reproduced with plain curl from
+  Ubuntu 14.04, so it is the firmware, not fyrtaarn.
+
+**Refuses ipmitool's own cipher-suite choice** (`refuses-auto-cipher-suite`)
+
+- *What you see:* with ipmitool 1.8.19 or later, every IPMI command fails with "no matching cipher
+  suite"; with ipmitool 1.8.18 everything works.
+- *Cause:* ipmitool 1.8.19 asks the BMC for its supported suites and picks the strongest it knows,
+  suite 17 (HMAC-SHA256 with AES). This BMC advertises suite 17 in its own list, then refuses it
+  when a session is opened with it. Suite 3 works.
+- *What fyrtaarn does:* on that error, retries once with `-C 3` and keeps the BMC on it. Once the
+  BMC is recognised, `-C 3` is used from the first command.
+- *What you can do:* nothing. By hand, add `-C 3`.
+- *Evidence:* the Quanta, 23 November 2026, with ipmitool 1.8.19.
+
+**Uploading an image to the BMC does not work** (`lmedia-register-fails`)
+
+- *What you see:* Upload to BMC (LMedia) reports that the BMC would not register the image.
+- *Cause:* the upload itself is accepted, but the BMC answers status -1 when asked to register the
+  uploaded file. This happened with a formatted floppy image and a valid ISO alike, and identically
+  when the browser's own requests were replayed with curl, so it is the firmware.
+- *What fyrtaarn does:* still offers Upload to BMC, with a warning that it fails on this firmware.
+- *What you can do:* use Mount instead, which presents the image from your machine over the
+  network, has no size limit and works on this BMC.
+- *Evidence:* the Quanta, 23 November 2026.
+
+**Only obsolete TLS** (`legacy-tls-only`)
+
+- *What you see:* nothing in fyrtaarn. Current browsers, curl and OpenSSL 1.1 or later cannot open
+  the BMC's web interface at all.
+- *Cause:* the web server offers TLS 1.0 at most, and only the RC4-MD5, NULL-MD5 and two 40-bit
+  export cipher suites, none of which modern software will use.
+- *What fyrtaarn does:* its own small TLS client speaks RC4-MD5, so Redfish probes, AMI virtual
+  media set-up and the web UI proxy all work. The proxy serves the web interface to your browser on
+  your own machine, and its dialog shows the TLS in use with a warning that it is not secure. This
+  issue is detected when it happens, on any BMC, rather than by model.
+- *Evidence:* the Quanta, 23 November 2026; confirmed with Ubuntu 14.04's OpenSSL 1.0.1f.
+
+### Dell iDRAC9 (PowerEdge 14th generation; seen on firmware 4.20)
+
+**Refuses overlapping IPMI sessions** (`no-concurrent-sessions`)
+
+- *What you see:* nothing now. Before 0.6.5, connecting sometimes failed, leaving the host listed as
+  "vendor: Direct".
+- *Cause:* the iDRAC refuses a second IPMI session while one is being set up ("insufficient
+  resources for session"), and fyrtaarn used to fetch BMC Info with three ipmitool commands at
+  once; when the first was refused, the connect failed.
+- *What fyrtaarn does:* runs one IPMI command at a time per BMC, for every vendor.
+- *Evidence:* the iDRAC9 under Tested Hardware, October 2026.
+
+### Recovering a stalled BMC
+
+A BMC whose web interface or Redfish has stopped answering, while IPMI still works, can usually be
+brought back with a **cold reset of the BMC**. This restarts the management controller only: the
+server keeps running, its operating system and power state are untouched, and the BMC's settings,
+users and logs are kept. The BMC is unreachable for one to three minutes while it restarts, and
+any open console, virtual media or web session to it is cut.
+
+In fyrtaarn: select the host, then **BMC > Reset BMC (cold)...**. The dialog explains the above and
+asks you to type the BMC's address before it does anything. By hand:
+
+```bash
+ipmitool -I lanplus -H <bmc-address> -U <user> -E -C 3 mc reset cold
+```
+
+(`-E` reads the password from `IPMITOOL_PASSWORD`, or prompts for it.) This is what recovered both
+the iLO 4 and the Quanta above.
+
+### At a glance
+
+| Quirk | BMC | What goes wrong | What fyrtaarn does | Seen |
+|---|---|---|---|---|
+| `no-cipher-suite-list` | HP iLO 4 (FW 2.54) | Does not answer Get Channel Cipher Suites; ipmitool 1.8.19+ waits about 10 s on every command before falling back to suite 3 | -C 3 for this host after the first such failure (or straight away once identified) | ProLiant ML310e Gen8 v2 captures, 2026-11-23 |
+| `refuses-auto-cipher-suite` | Quanta, AMI MegaRAC SP (FW 7.54) | Lists cipher suite 17, which ipmitool 1.8.19+ then picks, but refuses it ("no matching cipher suite"); -C 3 works | Retry once with -C 3 and keep the host on it (or -C 3 straight away once identified) | Quanta in Tested Hardware, 2026-11-23 |
+| `redfish-log-entries-stall` | HP iLO 4 (seen on FW 2.54; applied to all iLO 4 as a precaution) | Requesting the IML log entries over Redfish stalled its web server: no answer to Redfish or its web pages for at least 30 minutes, until an iLO reset (mc reset cold) | Redfish event log entries are not requested; the IPMI event log is used instead | ProLiant ML310e Gen8 v2, 2026-11-23 (production box): stalled about 16:00, still stalled about 16:30, reset by IPMI |
+| `jnlp-needs-extrnip` | Quanta, AMI MegaRAC SP (FW 7.54) | Requesting the JViewer launch file without EXTRNIP crashes its web server until a BMC reset | EXTRNIP is always sent (amiweb), and the web UI proxy rewrites it to the BMC's address | Quanta in Tested Hardware, 2026-11-23, reproduced with curl |
+| `lmedia-register-fails` | Quanta, AMI MegaRAC SP (FW 7.54) | LMedia uploads are accepted but registering the image returns status -1, for any image | Upload to BMC still offered, with a warning that it fails on this firmware | Quanta in Tested Hardware, 2026-11-23, identical with the browser's requests replayed |
+| `legacy-tls-only` | Hosts whose HTTPS only works with the legacy TLS client (seen: Quanta, TLS 1.0 RC4-MD5) (detected at run time) | No TLS that Go or current browsers accept | legacytls falls back to its own TLS 1.0/1.1 RC4 client; the web UI proxy shows the negotiated TLS | Quanta in Tested Hardware, 2026-11-23 |
+| `no-concurrent-sessions` | Dell iDRAC9 (FW 4.20) | Refuses overlapping IPMI session set-ups ("insufficient resources for session") | One IPMI command at a time per BMC, for every vendor | iDRAC9 in Tested Hardware, 2026-10 |
+| `ipmi-over-lan-was-off` | HPE iLO 5 (FW 1.40) | IPMI over LAN was off on the one seen, so IPMI never answered while Redfish did | A failed connect checks it over Redfish and offers to switch it on; BMC > IPMI over LAN... | ProLiant ML350 Gen10 capture, 2026-11-23 |
+| `accounts-no-enabled-field` | HPE iLO 5 (FW 1.40) | Redfish accounts carry no Enabled or Locked field | Oem.Hpe.Privileges.LoginPriv is used for enabled | ProLiant ML350 Gen10 capture, 2026-11-23 |
 
 ## Requirements
 
@@ -424,6 +638,7 @@ sudo ./dist/fyrtaarn
 | F9 > BMC > IPMI over LAN | Results         | Check or switch IPMI over LAN (Redfish)       |
 | F9 > BMC > Redfish view | Results          | Manage the host over Redfish only             |
 | F9 > BMC > SOL settings | Results          | Check or switch SOL and your SOL access       |
+| F9 > BMC > Reset BMC   | Results           | Cold reset the BMC only (typed confirmation)  |
 | S / L / U / F          | Redfish view      | Sensors / event log / users / firmware        |
 | P / V / W              | Redfish view      | Power / virtual media / web UI                |
 | F9 > Export            | Results           | Export inventory to CSV / JSON                |
@@ -520,6 +735,17 @@ For detailed technical writeups and excellent explanations of:
 ---
 
 ## Changelog
+
+### 0.8.1
+
+- **Firmware fingerprints** — a scan reads each BMC's front-page ETag and recognises known firmware builds before any login, so their known issues apply from the first request (an iLO 4 2.54 gets `-C 3` on its first IPMI command). Known so far: iLO 4 2.54 and iLO 5 1.40, each serving one ETag on every static file, and iDRAC9 4.20.20.20, matched on the build-time part of Apache's per-file ETags. Listed under Known Issues, kept in step with the code by a test
+- **README: Known Issues** — a new section, by BMC, describing each known issue in full: what you see, the cause as far as it is known, what fyrtaarn does, what you can do, and the evidence, plus how to recover a stalled BMC with a cold reset. Writing it corrected one earlier claim: the Quanta lists cipher suite 17 among its suites and then refuses it, rather than leaving it out of its list
+- **Reset BMC (cold)** — new BMC menu item to restart a BMC's management controller only, over IPMI or Redfish `Manager.Reset`, behind a dialog that spells out what is and is not affected and needs the BMC's address typed to confirm
+- **Known issues registry** — BMC-specific problems now live in one place, `internal/quirks`, instead of in the code that hits them: a BMC's identity (IPMI manufacturer and product ID and firmware, Redfish manager firmware, web UI seen at scan time) is recorded as fyrtaarn learns it, and code asks the registry (e.g. "skip Redfish log entries on this host?"). Problems found at run time (a refused cipher suite, TLS that needs the legacy client) are recorded per host too. BMC Info and the Redfish view show "Known issues: N" and `[K]` lists them with what fyrtaarn does and where each was seen; the README's Known Issues table is kept in step by a test. Checked live on the Quanta: four issues, one of them learned during the session
+- **iLO 4: no Redfish event log** — the first request for an iLO 4 2.54's IML entries (ProLiant ML310e Gen8 v2, a capture run on 2026-11-23) went unanswered, and so did every Redfish request after it for minutes: its web server stalled. The Redfish view's `[L]` and `scripts/fy-capture.sh` no longer request log entries from an iLO 4 (recognised by manager firmware "iLO 4 ..."); its IPMI event log, `[L]` on BMC Info, is unaffected. Other BMCs are unchanged: an iLO 5 1.40 served 400 entries in about 3 seconds
+- **Users: names with spaces** — the user list was split on whitespace, so a name with a space shifted every later column; on an iLO 5 (FW 1.40), whose unused slots are named "(Empty User)", eleven users showed privilege "true NO ACCESS". Names are now read as everything between the ID and the three true/false columns
+- **Redfish accounts on iLO 5** — iLO 5 sends no `Enabled` field, so every account showed as disabled; HPE's `Oem.Hpe.Privileges.LoginPriv` is used where `Enabled` is absent, and a named account with neither counts as enabled
+- Both found in a capture of an iLO 5 1.40 (ProLiant ML350 Gen10) with IPMI over LAN switched on, which also confirmed on real data: event log (400 entries from the IML and IEL, newest first), firmware inventory (19 items), Chassis sensors (29), power actions, SEL (256), FRU and SOL info
 
 ### 0.8.0
 

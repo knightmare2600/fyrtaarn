@@ -103,3 +103,53 @@ func ResetSystem(host, user, pass, resetType string) error {
 	body, _ := json.Marshal(map[string]string{"ResetType": resetType})
 	return doPost(httpClient(), info.target, user, pass, body)
 }
+
+// ResetManager restarts the BMC itself (the first Manager) through the
+// standard Manager.Reset action; the server it manages is not touched.
+// HPE's OEM actions beside it (ResetToFactoryDefaults and others) are never
+// used. The reset type: ForceRestart or GracefulRestart if the BMC lists
+// them (iDRAC9 4.20 lists only GracefulRestart), else none: iLO 4 2.54 and
+// iLO 5 1.40 list no types and take the action without one.
+func ResetManager(host, user, pass string) (resetType string, err error) {
+	c := httpClient()
+	base := "https://" + host
+	col, err := fetchJSON(c, base+"/redfish/v1/Managers", user, pass)
+	if err != nil {
+		return "", err
+	}
+	paths := collectionPaths(col)
+	if len(paths) == 0 {
+		return "", errors.New("no Redfish managers")
+	}
+	mgr, err := fetchJSON(c, base+paths[0], user, pass)
+	if err != nil {
+		return "", err
+	}
+	acts, _ := mgr["Actions"].(map[string]any)
+	reset, _ := acts["#Manager.Reset"].(map[string]any)
+	target, _ := reset["target"].(string)
+	if target == "" {
+		return "", errors.New("this BMC's Redfish manager has no Manager.Reset action")
+	}
+	body := map[string]string{}
+	if vals, ok := reset["ResetType@Redfish.AllowableValues"].([]any); ok {
+		allowed := map[string]bool{}
+		for _, v := range vals {
+			if s, ok := v.(string); ok {
+				allowed[s] = true
+			}
+		}
+		for _, t := range []string{"ForceRestart", "GracefulRestart"} {
+			if allowed[t] {
+				resetType = t
+				break
+			}
+		}
+		if resetType == "" {
+			return "", fmt.Errorf("the BMC offers no restart reset type (allowed: %v)", vals)
+		}
+		body["ResetType"] = resetType
+	}
+	b, _ := json.Marshal(body)
+	return resetType, doPost(c, base+target, user, pass, b)
+}

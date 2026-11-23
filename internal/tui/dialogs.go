@@ -128,7 +128,12 @@ func NewVirtualMediaDialog(redfish bool) *Dialog {
 
 // NewLMediaWarningDialog confirms an LMedia upload, which changes BMC state
 // and has a hard size limit.
-func NewLMediaWarningDialog(path string) *Dialog {
+// knownToFail comes from internal/quirks (LMediaRegisterFails).
+func NewLMediaWarningDialog(path string, knownToFail bool) *Dialog {
+	warning := "Untested on this BMC"
+	if knownToFail {
+		warning = "Known to fail on this BMC's firmware (see [K] Known issues)"
+	}
 	return &Dialog{
 		Title: "Upload to BMC",
 		Body: "Store " + filepath.Base(path) + " on the BMC itself (LMedia)?\n\n" +
@@ -140,7 +145,7 @@ func NewLMediaWarningDialog(path string) *Dialog {
 			"  • Replaces any image already in that slot.\n\n" +
 			"Mount (network redirection) needs none of this and\n" +
 			"has no size limit.",
-		Warning: "Known to fail on the Quanta in Tested Hardware (FW 7.54)",
+		Warning: warning,
 		buttons: []DialogButton{
 			{Label: "Upload", Action: "vm-upload-confirm"},
 			{Label: "Cancel", Action: "cancel"},
