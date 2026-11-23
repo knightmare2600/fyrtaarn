@@ -76,6 +76,13 @@ func NewMenuBar() MenuBar {
 				},
 			},
 			{
+				Label: "BMC",
+				Accel: 'B',
+				Items: []SubItem{
+					{Label: "IPMI over LAN...", Accel: 'I', Action: "ipmi-lan"},
+				},
+			},
+			{
 				Label: "Help",
 				Accel: 'H',
 				Items: []SubItem{

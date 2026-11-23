@@ -2,13 +2,14 @@ package redfish
 
 import (
 	"bytes"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/knightmare2600/fyrtaarn/internal/legacytls"
 )
 
 // VirtualMediaProvider is the interface each vendor backend must satisfy.
@@ -59,9 +60,8 @@ func NewProvider(host, user, pass, manufacturer, _ string) VirtualMediaProvider 
 func httpClient() *http.Client {
 	return &http.Client{
 		Timeout: 10 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
-		},
+		// Old BMCs may only speak TLS 1.0/1.1 or RC4; see legacytls.
+		Transport: legacytls.Transport(),
 	}
 }
 

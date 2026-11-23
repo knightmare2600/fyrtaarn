@@ -21,6 +21,7 @@ import (
 	"github.com/knightmare2600/fyrtaarn/internal/redfish"
 	"github.com/knightmare2600/fyrtaarn/internal/session"
 	"github.com/knightmare2600/fyrtaarn/internal/util"
+	"github.com/knightmare2600/fyrtaarn/internal/webproxy"
 )
 
 type screen int
@@ -97,6 +98,12 @@ type vmMsg struct {
 	Err    error
 }
 
+type webProxyMsg struct {
+	Host  string
+	Proxy *webproxy.Proxy
+	Err   error
+}
+
 type usersMsg struct {
 	Entries []ipmi.UserEntry
 	Err     error
@@ -151,6 +158,31 @@ type App struct {
 	// rather than copying it once, so this stays open across the whole
 	// mount — only stopped on eject, a replacement mount, or app exit.
 	isoServerStop func()
+
+	// webProxies holds the running local web-UI proxies by BMC address. Each
+	// runs until stopped from its dialog or the app exits.
+	webProxies map[string]*webproxy.Proxy
+	webUIHost  string // host whose web-UI dialog is open, for "webui-stop"
+
+	// amiMediaStop detaches the image attached to amiMediaHost through AMI
+	// network media redirection (BMCs without Redfish). The image is read
+	// from this machine on demand, so it stays attached only while this
+	// runs: until Eject, another mount, or exit.
+	amiMediaStop func()
+	amiMediaHost string
+	// lmediaPath is the file awaiting the LMedia warning's confirmation.
+	lmediaPath string
+
+	// ipmiLanHost is the host the IPMI over LAN dialog is about;
+	// ipmiLanFromConnect says a failed connect opened it, so enabling
+	// retries the connect.
+	ipmiLanHost        string
+	ipmiLanFromConnect bool
+
+	// statusSeen/statusSeenAt track when the status text last changed, so
+	// the status bar can show it before falling back to the key hints.
+	statusSeen   string
+	statusSeenAt time.Time
 
 	currentScreen screen
 
@@ -465,6 +497,38 @@ func runVMAction(host, isoURL, user, pass, manufacturer, action string) tea.Cmd 
 	}
 }
 
+// statusShowFor is how long a new status message replaces the key hints.
+const statusShowFor = 10 * time.Second
+
+// stopAMIMedia detaches any image attached through AMI media redirection.
+// Its ServeCD goroutine then ends and amiMediaEndedMsg arrives.
+func (a *App) stopAMIMedia() {
+	if a.amiMediaStop != nil {
+		a.amiMediaStop()
+	}
+}
+
+func startWebProxy(host string) tea.Cmd {
+	return func() tea.Msg {
+		p, err := webproxy.Start(host)
+		return webProxyMsg{Host: host, Proxy: p, Err: err}
+	}
+}
+
+// openWebUI shows the web-UI dialog for host, starting its proxy first if
+// none is running.
+func (a *App) openWebUI(host string) (tea.Model, tea.Cmd) {
+	if p, ok := a.webProxies[host]; ok {
+		a.webUIHost = host
+		a.activeDialog = NewWebUIDialog(p)
+		return a, nil
+	}
+	a.ipmiLoading = true
+	a.loadProgress = Progress{}
+	a.status = "Starting web UI proxy for " + host + "..."
+	return a, tea.Batch(a.spinner.Tick, startWebProxy(host))
+}
+
 func runMCInfo(host, user, pass string) tea.Cmd {
 	return func() tea.Msg {
 		// Sequential, not parallel: concurrent session set-ups to one BMC
@@ -753,11 +817,19 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.ipmiLoading = false
 		if msg.Err != nil {
 			a.status = msg.Err.Error()
-			// Clear bad credentials so the next Enter prompts again.
-			if len(a.results) > 0 && a.selectedHost >= 0 {
-				a.sessionCache.Delete(a.results[a.selectedHost].IP)
-			}
 			a.currentScreen = screenResults
+			if len(a.results) > 0 && a.selectedHost >= 0 {
+				host := a.results[a.selectedHost]
+				// Clear bad credentials so the next Enter prompts again.
+				a.sessionCache.Delete(host.IP)
+				// No IPMI session but Redfish available: IPMI over LAN may
+				// simply be switched off on the BMC. Check.
+				if host.HasRedfish && strings.Contains(msg.Err.Error(), rmcpFailMarker) {
+					a.ipmiLoading = true
+					a.status = "IPMI did not answer; checking over Redfish whether IPMI over LAN is off..."
+					return a, tea.Batch(a.spinner.Tick, queryIPMILan(host.IP, a.username, a.password, true, msg.Err))
+				}
+			}
 			return a, nil
 		}
 		// Cache successful credentials and BMC details for this host.
@@ -1042,6 +1114,69 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case webProxyMsg:
+		a.ipmiLoading = false
+		if msg.Err != nil {
+			a.status = "Web UI: " + msg.Err.Error()
+			a.logf("Web UI proxy for %s failed: %v", msg.Host, msg.Err)
+			return a, nil
+		}
+		if old, ok := a.webProxies[msg.Host]; ok {
+			// Two starts raced (key pressed twice); keep the first.
+			_ = msg.Proxy.Close()
+			msg.Proxy = old
+		} else {
+			if a.webProxies == nil {
+				a.webProxies = map[string]*webproxy.Proxy{}
+			}
+			a.webProxies[msg.Host] = msg.Proxy
+			a.logf("Web UI proxy for %s at %s (%s)", msg.Host, msg.Proxy.URL, msg.Proxy.TLS)
+		}
+		a.status = "Web UI for " + msg.Host + " at " + msg.Proxy.URL
+		a.webUIHost = msg.Host
+		a.activeDialog = NewWebUIDialog(msg.Proxy)
+		return a, nil
+
+	case ipmiLanMsg:
+		return a.handleIPMILanMsg(msg)
+
+	case ipmiLanSetMsg:
+		return a.handleIPMILanSetMsg(msg)
+
+	case amiMediaMsg:
+		a.ipmiLoading = false
+		if msg.Err != nil {
+			a.status = "Virtual media error: " + msg.Err.Error()
+			a.logf("AMI media redirection of %s to %s failed: %v", msg.Path, msg.Host, msg.Err)
+			return a, nil
+		}
+		a.amiMediaStop, a.amiMediaHost = msg.Stop, msg.Host
+		a.status = fmt.Sprintf("%s attached to %s as a virtual CD; it stays attached until Eject or exit", msg.Path, msg.Host)
+		a.logf("Attached %s to %s via AMI media redirection", msg.Path, msg.Host)
+		return a, waitAMIMedia(msg.Host, msg.Done)
+
+	case amiMediaEndedMsg:
+		if a.amiMediaHost == msg.Host {
+			a.amiMediaStop, a.amiMediaHost = nil, ""
+		}
+		if msg.Err != nil {
+			a.status = "Virtual CD on " + msg.Host + " detached: " + msg.Err.Error()
+		} else {
+			a.status = "Virtual CD on " + msg.Host + " detached"
+		}
+		a.logf("AMI media redirection to %s ended: %v", msg.Host, msg.Err)
+		return a, nil
+
+	case lmediaMsg:
+		a.ipmiLoading = false
+		if msg.Err != nil {
+			a.status = "Upload to BMC failed: " + msg.Err.Error()
+		} else {
+			a.status = msg.Name + " stored on " + msg.Host + "; attach it from the BMC's web UI (Local Media)"
+		}
+		a.logf("LMedia upload of %s to %s: %v", msg.Name, msg.Host, msg.Err)
+		return a, nil
+
 	case vmMsg:
 		a.ipmiLoading = false
 		if msg.Err != nil {
@@ -1176,6 +1311,8 @@ func (a *App) handleMenuAction(action string) (tea.Model, tea.Cmd) {
 	switch {
 	case action == "quit":
 		return a, a.quit()
+	case action == "ipmi-lan":
+		return a.openIPMILan()
 	case action == "connect-bmc-dialog":
 		a.activeDialog = NewConnectBMCDialog("", a.username)
 		return a, textinput.Blink
@@ -1239,6 +1376,46 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 
 	case "cancel":
 		a.activeDialog = nil
+		return a, nil
+
+	case "ipmilan-on", "ipmilan-off":
+		a.activeDialog = nil
+		on := action == "ipmilan-on"
+		a.ipmiLoading = true
+		a.status = "Switching IPMI over LAN " + onOffWord(on) + " on " + a.ipmiLanHost + " via Redfish..."
+		return a, tea.Batch(a.spinner.Tick, setIPMILan(a.ipmiLanHost, a.username, a.password, on, a.ipmiLanFromConnect))
+
+	case "vm-upload":
+		dlg := a.activeDialog
+		a.activeDialog = nil
+		input := strings.TrimSpace(dlg.InputValue(0))
+		if input == "" || strings.HasPrefix(input, "http://") || strings.HasPrefix(input, "https://") {
+			a.status = "Upload to BMC needs a local file path"
+			return a, nil
+		}
+		a.lmediaPath = expandHome(input)
+		a.activeDialog = NewLMediaWarningDialog(a.lmediaPath)
+		return a, nil
+
+	case "vm-upload-confirm":
+		a.activeDialog = nil
+		if len(a.results) == 0 || a.lmediaPath == "" {
+			return a, nil
+		}
+		host := a.results[a.selectedHost].IP
+		path := a.lmediaPath
+		a.lmediaPath = ""
+		a.ipmiLoading = true
+		a.status = "Uploading " + path + " to " + host + " (the BMC answers nothing else meanwhile)..."
+		return a, tea.Batch(a.spinner.Tick, uploadLMedia(host, a.username, a.password, path))
+
+	case "webui-stop":
+		a.activeDialog = nil
+		if p, ok := a.webProxies[a.webUIHost]; ok {
+			_ = p.Close()
+			delete(a.webProxies, a.webUIHost)
+			a.status = "Web UI proxy for " + a.webUIHost + " stopped"
+		}
 		return a, nil
 
 	case "export-csv", "export-json":
@@ -1362,9 +1539,16 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		host := a.results[a.selectedHost]
+		a.stopAMIMedia()
 		if !host.HasRedfish {
-			a.status = "Virtual media requires Redfish — host does not advertise it"
-			return a, nil
+			if strings.HasPrefix(input, "http://") || strings.HasPrefix(input, "https://") {
+				a.status = "This BMC has no Redfish: give a local file path, not a URL"
+				return a, nil
+			}
+			path := expandHome(input)
+			a.ipmiLoading = true
+			a.status = fmt.Sprintf("Attaching %s to %s (AMI media redirection)...", path, host.IP)
+			return a, tea.Batch(a.spinner.Tick, startAMIMedia(host.IP, a.username, a.password, path))
 		}
 
 		// A previous local server is done once a new mount replaces it,
@@ -1408,7 +1592,12 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 		}
 		host := a.results[a.selectedHost]
 		if !host.HasRedfish {
-			a.status = "Virtual media requires Redfish — host does not advertise it"
+			if a.amiMediaHost == host.IP && a.amiMediaStop != nil {
+				a.stopAMIMedia() // the ended message reports the detach
+				a.status = "Detaching virtual CD from " + host.IP
+			} else {
+				a.status = "No image attached to " + host.IP + " by this session"
+			}
 			return a, nil
 		}
 		if a.isoServerStop != nil {
@@ -1647,6 +1836,11 @@ func (a *App) quit() tea.Cmd {
 		a.isoServerStop()
 		a.isoServerStop = nil
 	}
+	a.stopAMIMedia()
+	for host, p := range a.webProxies {
+		_ = p.Close()
+		delete(a.webProxies, host)
+	}
 	if a.sessionLog != nil {
 		a.logf("Fyrtaarn exited.")
 		_ = a.sessionLog.Close()
@@ -1756,6 +1950,12 @@ func (a *App) updateResults(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		a.activeDialog = NewLoginDialog(a.username)
 		return a, textinput.Blink
+
+	case "w":
+		if len(a.results) == 0 || a.selectedHost < 0 {
+			return a, nil
+		}
+		return a.openWebUI(a.results[a.selectedHost].IP)
 	}
 
 	return a, nil
@@ -1828,8 +2028,17 @@ func (a *App) updateMCInfo(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(a.spinner.Tick, checkChassisForSOL(host, a.username, a.password))
 
 	case "v":
-		a.activeDialog = NewVirtualMediaDialog()
+		if len(a.results) == 0 {
+			return a, nil
+		}
+		a.activeDialog = NewVirtualMediaDialog(a.results[a.selectedHost].HasRedfish)
 		return a, textinput.Blink
+
+	case "w":
+		if len(a.results) == 0 {
+			return a, nil
+		}
+		return a.openWebUI(a.results[a.selectedHost].IP)
 
 	case "u":
 		if len(a.results) == 0 {
@@ -2443,6 +2652,16 @@ func (a *App) screenStatusHint() string {
 		return a.activeFavDialog.HintText()
 	}
 
+	// A new status message (an action's result or error) replaces the key
+	// hints for statusShowFor, then the hints return on the next redraw.
+	// Without this, screens with a hint line never showed a.status at all.
+	if a.status != a.statusSeen {
+		a.statusSeen, a.statusSeenAt = a.status, time.Now()
+	}
+	if a.status != "" && time.Since(a.statusSeenAt) < statusShowFor {
+		return a.status
+	}
+
 	visibleLines := a.contentH - 6
 	if visibleLines < 1 {
 		visibleLines = 5
@@ -2465,7 +2684,7 @@ func (a *App) screenStatusHint() string {
 		if a.selectedHost >= 0 {
 			pos = strconv.Itoa(a.selectedHost + 1)
 		}
-		hint := fmt.Sprintf("[%s/%d]  [↑↓/jk] Navigate  [Tab] Expand  [Enter] Connect  [F9] Menu  [Q] Quit", pos, total)
+		hint := fmt.Sprintf("[%s/%d]  [↑↓/jk] Navigate  [Tab] Expand  [Enter] Connect  [W] Web UI  [F9] Menu  [Q] Quit", pos, total)
 		if total > visLines {
 			end := a.resultsOffset + visLines
 			if end > total {
@@ -2476,7 +2695,7 @@ func (a *App) screenStatusHint() string {
 		return hint
 
 	case screenMCInfo:
-		return "[S] Sensors  [L] Log  [F] FRU  [U] Users  [C] Compliance  [R] Redfish  [P] Power  [O] SOL  [V] Virtual Media  [ESC] Back"
+		return "[S] Sensors  [L] Log  [F] FRU  [U] Users  [C] Compliance  [R] Redfish  [P] Power  [O] SOL  [V] Virtual Media  [W] Web UI  [ESC] Back"
 
 	case screenSensor:
 		total := len(a.sensors)

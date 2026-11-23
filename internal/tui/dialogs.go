@@ -2,11 +2,14 @@ package tui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/knightmare2600/fyrtaarn/internal/webproxy"
 )
 
 type DialogButton struct {
@@ -73,30 +76,72 @@ func NewScanDialog(cidr string, isRoot bool, lastPorts string) *Dialog {
 	}
 }
 
-// NewVirtualMediaDialog creates the virtual media mount dialog.
-func NewVirtualMediaDialog() *Dialog {
+// NewVirtualMediaDialog creates the virtual media mount dialog. Hosts with
+// Redfish mount through it; hosts without get AMI MegaRAC SP network media
+// redirection, plus an Upload to BMC (LMedia) button.
+func NewVirtualMediaDialog(redfish bool) *Dialog {
 	inp := textinput.New()
 	inp.Placeholder = "http://fileserver/image.iso  or  ~/isos/image.iso"
 	inp.Width = 50
 	inp.Focus()
 
-	return &Dialog{
-		Title: "Virtual Media",
-		Body: "Mount or eject a virtual ISO image via Redfish.\n" +
-			"Enter an HTTP(S) URL, or a local file path — a local\n" +
-			"path is served to the BMC automatically from this\n" +
-			"machine for as long as the image stays mounted.\n" +
-			"A URL is fetched by the BMC itself, so it must be\n" +
-			"reachable from the BMC's network, not just from here.\n" +
-			"Host must support Redfish VirtualMedia.",
-		inputs:      []textinput.Model{inp},
-		inputLabels: []string{"ISO URL / Local Path"},
-		buttons: []DialogButton{
+	body := "Mount or eject a virtual ISO image via Redfish.\n" +
+		"Enter an HTTP(S) URL, or a local file path — a local\n" +
+		"path is served to the BMC automatically from this\n" +
+		"machine for as long as the image stays mounted.\n" +
+		"A URL is fetched by the BMC itself, so it must be\n" +
+		"reachable from the BMC's network, not just from here."
+	buttons := []DialogButton{
+		{Label: "Mount", Action: "vm-mount"},
+		{Label: "Eject", Action: "vm-eject"},
+		{Label: "Cancel", Action: "cancel"},
+	}
+	if !redfish {
+		inp.Placeholder = "~/isos/image.iso"
+		body = "This BMC has no Redfish. Mount attaches a local file\n" +
+			"as the server's virtual CD through AMI MegaRAC media\n" +
+			"redirection (what the Java console does). The image\n" +
+			"is read from this machine on demand, any size, and\n" +
+			"stays attached until Eject or fyrtaarn exits.\n\n" +
+			"Upload to BMC stores a small image on the BMC itself\n" +
+			"instead (LMedia, 16 MiB at most)."
+		buttons = []DialogButton{
 			{Label: "Mount", Action: "vm-mount"},
 			{Label: "Eject", Action: "vm-eject"},
+			{Label: "Upload to BMC", Action: "vm-upload"},
+			{Label: "Cancel", Action: "cancel"},
+		}
+	}
+	return &Dialog{
+		Title:       "Virtual Media",
+		Body:        body,
+		inputs:      []textinput.Model{inp},
+		inputLabels: []string{"ISO URL / Local Path"},
+		buttons:     buttons,
+		focus:       0,
+	}
+}
+
+// NewLMediaWarningDialog confirms an LMedia upload, which changes BMC state
+// and has a hard size limit.
+func NewLMediaWarningDialog(path string) *Dialog {
+	return &Dialog{
+		Title: "Upload to BMC",
+		Body: "Store " + filepath.Base(path) + " on the BMC itself (LMedia)?\n\n" +
+			"  • 16 MiB at most: floppy images and small ISOs only.\n" +
+			"  • Switches the BMC's Local Media setting on if it is\n" +
+			"    off, which closes any open virtual media session.\n" +
+			"  • The BMC answers nothing else while it receives\n" +
+			"    the file.\n" +
+			"  • Replaces any image already in that slot.\n\n" +
+			"Mount (network redirection) needs none of this and\n" +
+			"has no size limit.",
+		Warning: "Known to fail on the Quanta in Tested Hardware (FW 7.54)",
+		buttons: []DialogButton{
+			{Label: "Upload", Action: "vm-upload-confirm"},
 			{Label: "Cancel", Action: "cancel"},
 		},
-		focus: 0,
+		focus: 1, // default to the harmless choice
 	}
 }
 
@@ -500,6 +545,32 @@ func NewSOLUnsupportedDialog(host, user string) *Dialog {
 			"Leave the console with ~. at the start of a line.",
 		buttons: []DialogButton{
 			{Label: "Close", Action: "cancel"},
+		},
+		focus: 0,
+	}
+}
+
+// NewWebUIDialog shows where a BMC's web interface is being served locally.
+func NewWebUIDialog(p *webproxy.Proxy) *Dialog {
+	warning := ""
+	if p.TLS.Legacy() {
+		warning = "Old TLS to the BMC: not safe from an attacker on that network"
+	}
+	return &Dialog{
+		Title: "Web UI",
+		Body: fmt.Sprintf("The web interface of %s is being served at:\n\n"+
+			"  %s\n\n"+
+			"Open it in a browser on this machine. It runs until\n"+
+			"stopped here or fyrtaarn exits.\n\n"+
+			"Connection to the BMC:\n"+
+			"  %s\n\n"+
+			"Running fyrtaarn over SSH? Forward the port first:\n"+
+			"  ssh -L %d:127.0.0.1:%d <this machine>",
+			p.Host, p.URL, p.TLS, p.Port, p.Port),
+		Warning: warning,
+		buttons: []DialogButton{
+			{Label: "Close", Action: "cancel"},
+			{Label: "Stop Proxy", Action: "webui-stop"},
 		},
 		focus: 0,
 	}

@@ -24,6 +24,10 @@ import getpass, os, sys
 d = os.environ["FAKE_DIR"]
 open(os.path.join(d, "argv"), "w").write("\0".join(sys.argv))
 open(os.path.join(d, "envpass"), "w").write(os.environ.get("IPMITOOL_PASSWORD", "<unset>"))
+if os.environ.get("FAKE_NO_CIPHER_LIST") and "-C" not in sys.argv:
+    # iLO 4 does not answer Get Channel Cipher Suites; ipmitool 1.8.19+
+    # prints this, then falls back to suite 3 (lanplus.c).
+    print("Unable to Get Channel Cipher Suites", file=sys.stderr)
 if os.environ.get("FAKE_FAIL"):
     print("Error: Unable to establish IPMI v2 / RMCP+ session", file=sys.stderr)
     sys.exit(1)
@@ -142,5 +146,45 @@ func TestPromptedFallbackWithoutPty(t *testing.T) {
 	}
 	if strings.Contains(argv, "admin-pw") {
 		t.Errorf("session password in argv: %q", argv)
+	}
+}
+
+// TestCipherSuite3Fallback checks a host that cannot list its cipher suites
+// (iLO 4) gets -C 3 from the second call on, and other hosts never do.
+func TestCipherSuite3Fallback(t *testing.T) {
+	dir := fakeIPMITool(t)
+	hasC3 := func() bool { return strings.Contains(readFile(t, filepath.Join(dir, "argv")), "\x00-C\x003\x00") }
+
+	if _, err := runIPMICommand("10.9.9.1", "u", "p", 5*time.Second, "mc", "info"); err != nil {
+		t.Fatal(err)
+	}
+	if hasC3() {
+		t.Fatal("-C 3 passed before any cipher-list failure was seen")
+	}
+
+	t.Setenv("FAKE_NO_CIPHER_LIST", "1")
+	const ilo = "10.9.9.2"
+	t.Cleanup(func() { suite3Hosts.Delete(ilo) })
+	if _, err := runIPMICommand(ilo, "u", "p", 5*time.Second, "mc", "info"); err != nil {
+		t.Fatal(err)
+	}
+	if hasC3() {
+		t.Fatal("first call already had -C 3")
+	}
+	if _, err := runIPMICommand(ilo, "u", "p", 5*time.Second, "mc", "info"); err != nil {
+		t.Fatal(err)
+	}
+	if !hasC3() {
+		t.Fatalf("second call to %s lacks -C 3: %q", ilo, readFile(t, filepath.Join(dir, "argv")))
+	}
+	if got := readFile(t, filepath.Join(dir, "argv")); !strings.HasSuffix(got, "\x00-E\x00-C\x003\x00mc\x00info") {
+		t.Fatalf("-C 3 not before the command: %q", got)
+	}
+
+	if _, err := runIPMICommand("10.9.9.1", "u", "p", 5*time.Second, "mc", "info"); err != nil {
+		t.Fatal(err)
+	}
+	if hasC3() {
+		t.Fatal("unaffected host got -C 3")
 	}
 }

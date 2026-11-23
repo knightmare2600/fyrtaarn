@@ -2,13 +2,14 @@ package discovery
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/knightmare2600/fyrtaarn/internal/legacytls"
 )
 
 // EnrichResults runs reverse DNS and Redfish probing concurrently after nmap
@@ -75,9 +76,8 @@ func redfishClient() *http.Client {
 	// BMC devices universally use self-signed certificates.
 	return &http.Client{
 		Timeout: 4 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
-		},
+		// Old BMCs may only speak TLS 1.0/1.1 or RC4; see legacytls.
+		Transport: legacytls.Transport(),
 	}
 }
 

@@ -40,6 +40,22 @@ func lockHost(host string) func() {
 	return mu.Unlock
 }
 
+// noCipherListMarker is what ipmitool 1.8.19+ prints when the BMC does not
+// answer Get Channel Cipher Suites (HP iLO 4, seen on FW 2.54). ipmitool
+// then waits about 10 s before falling back to cipher suite 3 — on every
+// call. suite3Hosts remembers such hosts so later calls pass -C 3 and skip
+// the query: the same suite ipmitool would have ended up using
+// (ipmi_find_best_cipher_suite in src/plugins/lanplus/lanplus.c).
+const noCipherListMarker = "Unable to Get Channel Cipher Suites"
+
+var suite3Hosts sync.Map
+
+func noteCipherFallback(host, output string) {
+	if strings.Contains(output, noCipherListMarker) {
+		suite3Hosts.Store(host, struct{}{})
+	}
+}
+
 func runIPMICommand(
 	host string,
 	user string,
@@ -66,6 +82,7 @@ func runIPMICommand(
 	cmd.Stderr = &stderr
 
 	err := cmd.Run()
+	noteCipherFallback(host, stderr.String())
 
 	if err != nil {
 		if ctx.Err() != nil {
@@ -84,12 +101,16 @@ func runIPMICommand(
 // IPMITOOL_PASSWORD before IPMI_PASSWORD (ipmi_main.c), so set the former
 // and drop any inherited copy of either, which would otherwise win.
 func ipmitoolCmd(ctx context.Context, host, user, pass string, command ...string) *exec.Cmd {
-	args := append([]string{
+	args := []string{
 		"-I", "lanplus",
 		"-H", host,
 		"-U", user,
 		"-E",
-	}, command...)
+	}
+	if _, ok := suite3Hosts.Load(host); ok {
+		args = append(args, "-C", "3")
+	}
+	args = append(args, command...)
 	cmd := exec.CommandContext(ctx, "ipmitool", args...)
 
 	env := make([]string, 0, len(os.Environ())+1)
@@ -199,6 +220,7 @@ func runIPMIPrompted(
 	waitErr := cmd.Wait()
 	<-readDone
 	_ = ptmx.Close()
+	noteCipherFallback(host, output())
 
 	if waitErr != nil {
 		if ctx.Err() != nil {
