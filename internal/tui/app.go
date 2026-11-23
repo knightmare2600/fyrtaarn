@@ -39,6 +39,7 @@ const (
 	screenRedfish
 	screenSOL
 	screenDashboard
+	screenFileBrowser
 )
 
 const maxRecentConnections = 5
@@ -209,6 +210,12 @@ type App struct {
 
 	// bmcResetHost: the host the BMC reset confirmation is about.
 	bmcResetHost string
+
+	// The Virtual Media file browser (filebrowser.go): the browser, the
+	// screen to return to, and whether the dialog was the Redfish one.
+	fb          *fileBrowser
+	fbReturn    screen
+	fbRedfishVM bool
 
 	// mouseReleased is true while mouse reporting is off (see syncMouse).
 	mouseReleased bool
@@ -542,6 +549,21 @@ func (a *App) infoScreen() screen {
 	return screenMCInfo
 }
 
+// closeFileBrowser returns to the Virtual Media dialog, with chosen in its
+// path box if a file was picked.
+func (a *App) closeFileBrowser(chosen string) (tea.Model, tea.Cmd) {
+	a.currentScreen = a.fbReturn
+	d := NewVirtualMediaDialog(a.fbRedfishVM)
+	if chosen != "" {
+		d.inputs[0].SetValue(chosen)
+		d.inputs[0].CursorEnd()
+		d.inputs[0].Blur()
+		d.focus = 1 // the Mount button
+	}
+	a.activeDialog = d
+	return a, textinput.Blink
+}
+
 // statusShowFor is how long a new status message replaces the key hints.
 const statusShowFor = 10 * time.Second
 
@@ -819,6 +841,13 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			action, _ := a.menuBar.HandleMouse(msg.X, msg.Y)
 			if action != "" {
 				return a.handleMenuAction(action)
+			}
+		}
+		// The file browser gets clicks below the menu bar (content starts
+		// on screen row 1) and the wheel, while no menu is open.
+		if a.currentScreen == screenFileBrowser && a.fb != nil && !a.menuBar.IsOpen() && msg.Y >= 1 {
+			if chosen, done := a.fb.mouse(msg, msg.Y-1, a.contentH); done {
+				return a.closeFileBrowser(chosen)
 			}
 		}
 		return a, nil
@@ -1441,6 +1470,12 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a.updateSOL(msg)
 		case screenDashboard:
 			return a.updateDashboard(msg)
+		case screenFileBrowser:
+			chosen, done := a.fb.key(msg.String(), a.contentH)
+			if done {
+				return a.closeFileBrowser(chosen)
+			}
+			return a, nil
 		case screenAbout:
 			// About is now an activeDialog — this case is unreachable but kept
 			// as a safety fallback.
@@ -1544,6 +1579,18 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 
 	case "bmc-reset-confirm":
 		return a.confirmBMCReset()
+
+	case "vm-browse":
+		typed := a.activeDialog.InputValue(0)
+		a.activeDialog = nil
+		if len(a.results) == 0 || a.selectedHost < 0 {
+			return a, nil
+		}
+		a.fbRedfishVM = a.results[a.selectedHost].HasRedfish
+		a.fbReturn = a.currentScreen
+		a.fb = newFileBrowser(typed)
+		a.currentScreen = screenFileBrowser
+		return a, nil
 
 	case "ipmilan-on", "ipmilan-off":
 		a.activeDialog = nil
@@ -2611,6 +2658,8 @@ func (a *App) View() string {
 				content = a.renderSOL()
 			case screenDashboard:
 				content = a.renderDashboard()
+			case screenFileBrowser:
+				content = a.fb.render(a.width, a.contentH)
 			case screenAbout:
 				content = a.aboutView()
 			default:
@@ -2928,6 +2977,9 @@ func (a *App) screenStatusHint() string {
 
 	case screenDashboard:
 		return "[+/-] Refresh interval  [R] Refresh now  [ESC] Back to sensors"
+
+	case screenFileBrowser:
+		return "[↑↓/Click] Select  [Enter/Click again] Open  [←/Bksp] Up  [~] Home  [.] Hidden  [A] All files  [ESC] Cancel"
 
 	case screenSEL:
 		total := len(a.selEntries)

@@ -50,8 +50,13 @@ func EnrichResults(results []HostResult) []HostResult {
 			defer wg.Done()
 			// The front page: one GET of "/", for the web UI's name (by
 			// title) and the firmware build (by ETag).
-			ui, etag := probeFrontPage(results[i].IP)
-			if fp, ok := quirks.FromETag(etag); ok {
+			page := probeFrontPage(results[i].IP)
+			ui := page.ui
+			fp, ok := quirks.FromETag(page.etag)
+			if !ok {
+				fp, ok = quirks.FromGzip(page.gzipTime, page.gzipName)
+			}
+			if ok {
 				results[i].Fingerprint = fp.BMC
 				quirks.Observe(results[i].IP, fp.Identity)
 			}
@@ -193,30 +198,48 @@ var titleRE = regexp.MustCompile(`(?is)<title>\s*(.*?)\s*</title>`)
 // probeWebUI names the web UI from the front page's title; "" if
 // unrecognised or unreachable.
 func probeWebUI(ip string) string {
-	ui, _ := probeFrontPage(ip)
-	return ui
+	return probeFrontPage(ip).ui
+}
+
+// frontPage is what one GET of a BMC's "/" tells fyrtaarn.
+type frontPage struct {
+	ui       string // web UI named from the title
+	etag     string // final page's ETag
+	gzipTime int64  // gzip MTIME, when the page came pre-compressed
+	gzipName string // gzip FNAME, likewise
 }
 
 // probeFrontPage fetches the BMC's HTTPS front page once (old TLS included,
 // through the same client as the Redfish probe), following redirects (the
-// Quanta answers / with a 302 to /index.html, iDRAC9 into /restgui/), and
-// returns the web UI named from its title and the final page's ETag.
-func probeFrontPage(ip string) (ui, etag string) {
-	resp, err := redfishClient().Get("https://" + ip + "/")
+// Quanta answers / with a 302 to /index.html, iDRAC9 into /restgui/). It
+// asks for the page uncompressed, so Go does not decompress it silently:
+// AMI's GoAhead sends its pre-compressed file anyway, and the gzip header,
+// which names the firmware build, is read before decompressing it here.
+func probeFrontPage(ip string) frontPage {
+	var fp frontPage
+	req, err := http.NewRequest(http.MethodGet, "https://"+ip+"/", nil)
 	if err != nil {
-		return "", ""
+		return fp
+	}
+	req.Header.Set("Accept-Encoding", "identity")
+	resp, err := redfishClient().Do(req)
+	if err != nil {
+		return fp
 	}
 	defer resp.Body.Close()
-	etag = resp.Header.Get("ETag")
+	fp.etag = resp.Header.Get("ETag")
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	if resp.Header.Get("Content-Encoding") == "gzip" {
+	if len(body) >= 10 && body[0] == 0x1f && body[1] == 0x8b {
 		if zr, err := gzip.NewReader(bytes.NewReader(body)); err == nil {
+			fp.gzipTime, fp.gzipName = zr.ModTime.Unix(), zr.Name
+			if zr.ModTime.IsZero() {
+				fp.gzipTime = 0
+			}
 			body, _ = io.ReadAll(io.LimitReader(zr, 64<<10))
 		}
 	}
-	m := titleRE.FindSubmatch(body)
-	if m == nil {
-		return "", etag
+	if m := titleRE.FindSubmatch(body); m != nil {
+		fp.ui = webUITitles[strings.ToLower(string(m[1]))]
 	}
-	return webUITitles[strings.ToLower(string(m[1]))], etag
+	return fp
 }

@@ -117,6 +117,20 @@ func TestFingerprints(t *testing.T) {
 	if _, ok := FromETag(""); ok {
 		t.Error("empty ETag matched")
 	}
+	// AMI GoAhead: the gzip header of a pre-compressed file.
+	const quanta = "Quanta S2RQ/S2RS, AMI MegaRAC SP, firmware 7.54"
+	tree := "/AMI_AST2300_2011Q3_tmp/branches/s2rq_s2rs/S2Rx_workspace/Build/output/ImageTree/usr/local/www/"
+	if f, ok := FromGzip(1378190263, tree+"index.html"); !ok || f.BMC != quanta || f.Identity.ProductID != 0x3252 {
+		t.Errorf("Quanta gzip: %v %q", ok, f.BMC)
+	}
+	for _, c := range []struct {
+		mtime int64
+		name  string
+	}{{1378190264, tree + "index.html"}, {1378190263, "/other/tree/index.html"}, {0, tree + "index.html"}, {1378190263, ""}} {
+		if _, ok := FromGzip(c.mtime, c.name); ok {
+			t.Errorf("gzip %d %q matched", c.mtime, c.name)
+		}
+	}
 	// A fingerprint alone, before any login, brings the known issues.
 	f, _ := FromETag(`"00ce4159"`)
 	Observe("h", f.Identity)
@@ -134,6 +148,9 @@ func TestReadmeListsEveryFingerprint(t *testing.T) {
 		key := f.ETag
 		if key == "" {
 			key = f.Build
+		}
+		if key == "" {
+			key = f.GzipRoot
 		}
 		if !strings.Contains(string(b), "`"+key+"`") {
 			t.Errorf("README.md does not list fingerprint `%s`", key)

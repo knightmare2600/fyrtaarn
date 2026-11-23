@@ -26,6 +26,21 @@ type Dialog struct {
 	inputLabels []string
 	buttons     []DialogButton
 	focus       int
+
+	// Body scrolling, for a body taller than the screen: the first body
+	// line shown, and how many body lines the last Render fitted (0 when
+	// the whole body fitted).
+	bodyOffset int
+	bodyRows   int
+}
+
+// scrollBody moves the body window by delta lines; Render clamps it.
+func (d *Dialog) scrollBody(delta int) bool {
+	if d.bodyRows == 0 {
+		return false
+	}
+	d.bodyOffset = max(d.bodyOffset+delta, 0)
+	return true
 }
 
 func (d *Dialog) totalFocusable() int {
@@ -96,6 +111,7 @@ func NewVirtualMediaDialog(redfish bool) *Dialog {
 		"Eject removes whatever is mounted."
 	buttons := []DialogButton{
 		{Label: "Mount", Action: "vm-mount"},
+		{Label: "Browse...", Action: "vm-browse"},
 		{Label: "Eject", Action: "vm-eject"},
 		{Label: "Cancel", Action: "cancel"},
 	}
@@ -111,6 +127,7 @@ func NewVirtualMediaDialog(redfish bool) *Dialog {
 			"instead (LMedia, 16 MiB at most)."
 		buttons = []DialogButton{
 			{Label: "Mount", Action: "vm-mount"},
+			{Label: "Browse...", Action: "vm-browse"},
 			{Label: "Eject", Action: "vm-eject"},
 			{Label: "Upload to BMC", Action: "vm-upload"},
 			{Label: "Cancel", Action: "cancel"},
@@ -368,6 +385,34 @@ func (d *Dialog) Update(msg tea.KeyMsg) (action string, consumed bool, cmd tea.C
 	n := d.totalFocusable()
 	if n == 0 {
 		return "", false, nil
+	}
+
+	// A body that does not fit scrolls with PgUp/PgDn, Home/End, and the
+	// arrows when there is nothing else to move between.
+	single := n == 1
+	switch msg.String() {
+	case "pgdown":
+		d.scrollBody(max(d.bodyRows-1, 1))
+		return "", true, nil
+	case "pgup":
+		d.scrollBody(-max(d.bodyRows-1, 1))
+		return "", true, nil
+	case "home":
+		if d.focus >= len(d.inputs) && d.scrollBody(-d.bodyOffset) {
+			return "", true, nil
+		}
+	case "end":
+		if d.focus >= len(d.inputs) && d.scrollBody(1<<20) {
+			return "", true, nil
+		}
+	case "down", "j":
+		if single && d.scrollBody(1) {
+			return "", true, nil
+		}
+	case "up", "k":
+		if single && d.scrollBody(-1) {
+			return "", true, nil
+		}
 	}
 
 	switch msg.String() {
@@ -724,16 +769,12 @@ func (d *Dialog) Render(w, h int) string {
 	var b strings.Builder
 
 	// Title is rendered in the border line by renderModal — not in the body.
-
-	if d.Body != "" {
-		for _, line := range strings.Split(d.Body, "\n") {
-			b.WriteString(line + "\n")
-		}
-		b.WriteString("\n")
-	}
+	// The body goes in last, once the rest is laid out, so that a body
+	// taller than the screen can be cut to a window that fits.
+	var rest strings.Builder
 
 	if d.Warning != "" {
-		b.WriteString(lipgloss.NewStyle().
+		rest.WriteString(lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#CB4B16")).
 			Bold(true).
 			Render("⚠ "+d.Warning) + "\n\n")
@@ -749,8 +790,8 @@ func (d *Dialog) Render(w, h int) string {
 		if focused {
 			ls = ls.Bold(true).Foreground(lipgloss.Color(CurrentTheme.Accent))
 		}
-		b.WriteString(ls.Render(label+":") + "\n")
-		b.WriteString(d.inputs[i].View() + "\n\n")
+		rest.WriteString(ls.Render(label+":") + "\n")
+		rest.WriteString(d.inputs[i].View() + "\n\n")
 	}
 
 	if len(d.buttons) > 0 {
@@ -763,7 +804,7 @@ func (d *Dialog) Render(w, h int) string {
 			part := renderButton(btn.Label, d.focus == len(d.inputs)+i, btn.Disabled)
 			pw := lipgloss.Width(part)
 			if rowW > 0 && rowW+1+pw > limit {
-				b.WriteString(row + "\n")
+				rest.WriteString(row + "\n")
 				row, rowW = "", 0
 			}
 			if rowW > 0 {
@@ -773,10 +814,33 @@ func (d *Dialog) Render(w, h int) string {
 			row += part
 			rowW += pw
 		}
-		b.WriteString(row + "\n")
+		rest.WriteString(row + "\n")
 	}
 
-	b.WriteString("\n[Tab] Next  [Enter] Select  [Esc] Cancel")
+	hints := "\n[Tab] Next  [Enter] Select  [Esc] Cancel"
+
+	if d.Body != "" {
+		lines := strings.Split(d.Body, "\n")
+		// The modal's border, padding and shadow take 5 rows; the rest,
+		// the hint line and the blank after the body take their own.
+		avail := h - 5 - strings.Count(rest.String(), "\n") - strings.Count(hints, "\n") - 2
+		d.bodyRows = 0
+		if h > 0 && len(lines) > avail && avail >= 3 {
+			rows := avail - 1 // one row for the position line
+			d.bodyOffset = min(d.bodyOffset, len(lines)-rows)
+			d.bodyRows = rows
+			pos := fmt.Sprintf("── lines %d–%d of %d  [PgUp/PgDn] scroll ──", d.bodyOffset+1, d.bodyOffset+rows, len(lines))
+			lines = append(lines[d.bodyOffset:d.bodyOffset+rows:d.bodyOffset+rows],
+				lipgloss.NewStyle().Foreground(lipgloss.Color(CurrentTheme.Accent)).Render(pos))
+			hints = "\n[PgUp/PgDn] Scroll  [Tab] Next  [Enter] Select  [Esc] Cancel"
+		}
+		for _, line := range lines {
+			b.WriteString(line + "\n")
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString(rest.String())
+	b.WriteString(hints)
 
 	return renderModal(d.Title, b.String(), w, h)
 }

@@ -100,6 +100,7 @@ The name reflects the project's purpose: visibility, remote control, and infrast
 - **Reset BMC (cold)** — BMC > Reset BMC (cold)... restarts the management controller only, over IPMI (`mc reset cold`) or, in Redfish-only mode, the standard Redfish `Manager.Reset` (never vendor actions such as HPE's ResetToFactoryDefaults beside it). The dialog states that the server keeps running, settings are kept, the BMC is unreachable for one to three minutes and open sessions to it are cut, and the BMC's address must be typed to confirm; Enter in the address box moves to Cancel, not Reset. fyrtaarn closes its own virtual drive and web UI proxy to that BMC first. Recovers a BMC whose web server has stalled, as the iLO 4 under Known Issues did
 - **SOL settings** — BMC > SOL settings... shows whether the BMC offers SOL, its bit rate and required privilege, and whether the logged-in user may use SOL, and offers to switch SOL on or off and to allow the user (Cancel focused). Uses channel 14 ("this channel"), so no per-vendor LAN channel number. The server must still redirect its console to the BMC's serial port in its own BIOS/UEFI setup, which differs by vendor; the dialog says so rather than guessing. Reading checked on the Quanta; the changes are untested on hardware
 - **Redfish-only mode** — for a BMC with IPMI over LAN off, or none: BMC > Redfish view... (or Use Redfish only in the IPMI over LAN dialog, so IPMI can stay off) shows the system and manager details over Redfish, and from there `[S]` reads sensors from the Chassis Thermal and Power resources (temperatures, fans, voltages, power draw; absent parts skipped), `[P]` offers power actions from the BMC's own list of allowed reset types (never NMI; Cancel focused), `[L]` the event log (every Systems and Managers log service, first page each, newest first), `[U]` user accounts (shown read-only: their IDs are not IPMI user IDs), `[F]` the firmware inventory, `[V]` virtual media and `[W]` the web UI. Checked against captured Redfish responses of an iDRAC9 4.20, an iLO 4 2.54 (whose fans use `FanName`/`CurrentReading`/`Units` instead of the standard names) and an iLO 5 1.40; the power actions are untested on hardware
+- **File browser for images** — Browse... in the Virtual Media dialog opens a full-screen browser to pick a local image instead of typing its path. It shows folders and images (`.iso`, `.img`, `.ima`, `.vfd`; `[A]` for all files, `[.]` for hidden ones), starts from the folder of a path already typed or else the home folder, and fills the chosen path into the dialog with Mount focused. Keyboard: arrows or `j`/`k`, PgUp/PgDn, Home/End, Enter to open or choose, Backspace or Left for the parent, `~` for home, Esc to go back. Mouse: click selects, clicking the selected entry opens or chooses it (terminals report no double-click), the wheel scrolls. Paths use the platform's own separators on Linux, macOS and Windows; on Windows, going up from a drive's root lists the drives. Folder links are followed; unreadable folders show their error without leaving the current one
 - **Direct connect** — File > Connect to BMC opens a dialog (IP, username, password) and connects without running a scan; host is added to the results tree so all subsequent operations work normally, and gets the same reverse-DNS and Redfish enrichment a scan gives it
 - **Recent Connections** — File > Recent Connections lists the last 5 hosts connected to, newest first, one entry per IP; selecting one reconnects straight away if this session already holds its credentials, otherwise opens Connect to BMC pre-filled with IP and username. Saved to `config.json` (IP and username only)
 - **Favourites** — up to 15 pinned hosts under File > Favourites, each with an optional name (shown as `Name — IP (user)`); File > Favourites > Manage Favourites... adds (`[A]`), edits (`[Enter]`) and deletes (`[D]`) them. The form's password box is session-only: it goes into the in-memory credential cache so the favourite connects without prompting until you quit, and is never written to disk. Saved to `config.json` (name, IP and username only)
@@ -172,6 +173,7 @@ The name reflects the project's purpose: visibility, remote control, and infrast
   (done — the generic walker accepts a slot by path or by `MediaTypes`)
 - Floppy / USB image support (done: Redfish USB/floppy slot, and AMI MegaRAC SP floppy and hard-disk redirection)
 - Remote media redirection
+- File browser in the Virtual Media dialog (done: see BMC Management)
 - AMI MegaRAC SP (pre-Redfish): CD-ROM, floppy and hard-disk redirection are done (see BMC
   Management), including secure mode (`-vmsecure 1`: TLS around the same stream, as JViewer's
   `PacketMaster.connectVmediaSSl` does); secure mode tested on the Quanta
@@ -282,13 +284,23 @@ is 7 May 2020 06:52:43 UTC in microseconds, the same as every file's `Last-Modif
 size parts were checked against the files' actual sizes.
 
 An ETag only identifies a build that has been seen before, and different products could in
-principle share one, so each entry below records where it was taken. BMCs whose web server sends
-no ETag, such as the Quanta's GoAhead, are recognised by other means.
+principle share one, so each entry below records where it was taken.
+
+AMI MegaRAC SP firmware on the GoAhead web server, as on the Quanta, sends no ETag at all, and its
+clock was never set, so its dates mean nothing either. It does serve every web file
+pre-compressed, and a gzip file's header (RFC 1952) records when it was compressed and the name of
+the file it came from. On the Quanta every file says it was compressed at 3 September 2013
+06:37:43 UTC from a path in AMI's build tree,
+`/AMI_AST2300_2011Q3_tmp/branches/s2rq_s2rs/S2Rx_workspace/Build/output/ImageTree/usr/local/www/index.html`
+for the front page: the chip (AST2300), AMI's 2011 Q3 code base and Quanta's board branch
+(S2RQ/S2RS). Fyrtaarn reads that header from the front page a scan already fetches, so it costs no
+extra request, and matches on the time together with the start of the path.
 
 | ETag | Firmware | Seen |
 |---|---|---|
 | `"00ce4159"` | HP iLO 4, firmware 2.54 | ProLiant ML310e Gen8 v2, 23 November 2026: the same ETag on `/`, `/favicon.ico` and `/css/eov_lteIE9.css` |
 | `5a50953d044c0` (after the dash) | Dell iDRAC9, firmware 4.20.20.20 | PowerEdge T140, 23 November 2026: on every file, e.g. `"99a-5a50953d044c0"` on the 2458-byte `/restgui/start.html` that `/` redirects to, which is what a scan reads |
+| gzip header: 2013-09-03 06:37:43 UTC, `/AMI_AST2300_2011Q3_tmp/branches/s2rq_s2rs/` | Quanta S2RQ/S2RS, AMI MegaRAC SP, firmware 7.54 | Quanta in Tested Hardware, 23 November 2026: the same time and build tree on `/index.html` and five other files |
 | `"00d2585c"` | HPE iLO 5, firmware 1.40 | ProLiant ML350 Gen10, 23 November 2026: the same ETag on `/`, `/favicon.ico` and `/images/app-icon.svg` |
 
 To add a BMC: fetch its front page and look at the `ETag` response header, for example with
@@ -632,6 +644,7 @@ sudo ./dist/fyrtaarn
 | PgDn                   | SOL Console       | Scroll down / snap to live bottom             |
 | All other keys / F1–F12| SOL Console       | Forwarded to BMC (incl. F2, F9)               |
 | V                      | BMC Info          | Virtual media dialog (Redfish)                |
+| Browse... (in V)       | Virtual media     | Pick a local image in a file browser          |
 | Enter                  | User list         | Open action dialog for user                   |
 | N                      | User list         | Create new user                               |
 | F9 > Connect to BMC    | Global            | Connect directly without scanning             |
@@ -735,6 +748,12 @@ For detailed technical writeups and excellent explanations of:
 ---
 
 ## Changelog
+
+### 0.8.2
+
+- **AMI firmware fingerprint** — a scan now also recognises the Quanta's AMI MegaRAC SP 7.54 before login, from the build time and build-tree path in the gzip header of its pre-compressed front page (its GoAhead server sends no ETag). Checked by a live scan of the Quanta
+- **Long dialogs scroll** — a dialog whose text is taller than the terminal, such as Known Issues on a small screen, shows a window of it with its position (`lines 1–12 of 30`); PgUp/PgDn scroll it, as do Home/End and the arrows when the dialog has only a Close button. Checked in a 24-row terminal on the Quanta's Known Issues
+- **File browser for images** — Browse... in the Virtual Media dialog picks a local image with keyboard or mouse, on Linux, macOS and Windows (drive list on Windows), and fills its path in. Checked in a real terminal against the Quanta: browsed, chosen with two mouse clicks, mounted and ejected
 
 ### 0.8.1
 

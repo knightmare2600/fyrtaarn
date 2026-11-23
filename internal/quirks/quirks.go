@@ -270,9 +270,16 @@ func Reset() {
 // Apache (iDRAC9) sends a different ETag per file, "<size>-<mtime>" in hex,
 // but every file of a firmware build shares the mtime part, the build time
 // in microseconds: such entries match on Build, the part after the dash.
+//
+// GoAhead-based AMI firmware sends no ETag but serves its web files
+// pre-compressed, and each file's gzip header carries the build time and
+// the file's path in the build tree (RFC 1952 MTIME and FNAME). Every file
+// of a build shares both; such entries match on GzipTime and GzipRoot.
 type Fingerprint struct {
 	ETag     string // whole ETag, quotes included; or empty when Build is set
 	Build    string // Apache ETag's part after "-", shared by every file
+	GzipTime int64  // gzip MTIME (Unix seconds) shared by every file
+	GzipRoot string // start of the gzip FNAME: the build tree
 	BMC      string
 	Identity Identity
 	Source   string
@@ -284,6 +291,12 @@ var Fingerprints = []Fingerprint{
 		ETag: `"00ce4159"`, BMC: "HP iLO 4, firmware 2.54",
 		Identity: Identity{ManufacturerID: MfrHP, ProductID: 0x2000, IPMIFirmware: "2.54", RedfishFirmware: "iLO 4 v2.54"},
 		Source:   "ProLiant ML310e Gen8 v2, 2026-11-23: same ETag on /, /favicon.ico and /css/eov_lteIE9.css",
+	},
+	{
+		GzipTime: 1378190263, GzipRoot: "/AMI_AST2300_2011Q3_tmp/branches/s2rq_s2rs/",
+		BMC:      "Quanta S2RQ/S2RS, AMI MegaRAC SP, firmware 7.54",
+		Identity: Identity{ManufacturerID: MfrQuanta, ProductID: 0x3252, IPMIFirmware: "7.54", WebUI: "AMI MegaRAC SP"},
+		Source:   "Quanta in Tested Hardware, 2026-11-23: gzip header on /index.html and five other files, built 2013-09-03 06:37:43 UTC in /AMI_AST2300_2011Q3_tmp/branches/s2rq_s2rs/S2Rx_workspace/",
 	},
 	{
 		Build: "5a50953d044c0", BMC: "Dell iDRAC9, firmware 4.20.20.20",
@@ -313,6 +326,20 @@ func FromETag(etag string) (Fingerprint, bool) {
 			return f, true
 		}
 		if f.Build != "" && strings.HasSuffix(e, "-"+f.Build+`"`) {
+			return f, true
+		}
+	}
+	return Fingerprint{}, false
+}
+
+// FromGzip returns the fingerprint for a pre-compressed file's gzip header:
+// its MTIME (Unix seconds) and FNAME.
+func FromGzip(mtime int64, name string) (Fingerprint, bool) {
+	if mtime == 0 || name == "" {
+		return Fingerprint{}, false
+	}
+	for _, f := range Fingerprints {
+		if f.GzipRoot != "" && f.GzipTime == mtime && strings.HasPrefix(name, f.GzipRoot) {
 			return f, true
 		}
 	}

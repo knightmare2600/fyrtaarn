@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -51,5 +52,50 @@ func TestKnownIssuesQuanta(t *testing.T) {
 	// A host with no known issues has no line.
 	if knownIssuesLine("10.1.1.1") != "" {
 		t.Fatal("line shown for an unknown host")
+	}
+}
+
+// TestDialogBodyScrolls: a body taller than the screen is cut to a window
+// that fits, with its position shown, and moves with PgDn, arrows and End.
+func TestDialogBodyScrolls(t *testing.T) {
+	var lines []string
+	for i := 1; i <= 60; i++ {
+		lines = append(lines, fmt.Sprintf("line %02d", i))
+	}
+	d := &Dialog{Title: "Long", Body: strings.Join(lines, "\n"), buttons: []DialogButton{{Label: "Close", Action: "cancel"}}}
+	for _, h := range []int{24, 40} {
+		out := ansi.Strip(d.Render(80, h))
+		if n := strings.Count(out, "\n") + 1; n > h {
+			t.Fatalf("h=%d: rendered %d rows", h, n)
+		}
+		if !strings.Contains(out, "line 01") || strings.Contains(out, "line 60") || !strings.Contains(out, "of 60") {
+			t.Fatalf("h=%d: first window wrong:\n%s", h, out)
+		}
+	}
+	d.Render(80, 24)
+	key := func(k tea.KeyType) { d.Update(tea.KeyMsg{Type: k}) }
+	key(tea.KeyPgDown)
+	if out := ansi.Strip(d.Render(80, 24)); strings.Contains(out, "line 01") || !strings.Contains(out, fmt.Sprintf("line %02d", d.bodyRows+1)) {
+		t.Fatalf("PgDn:\n%s", out)
+	}
+	key(tea.KeyEnd)
+	if out := ansi.Strip(d.Render(80, 24)); !strings.Contains(out, "line 60") {
+		t.Fatalf("End:\n%s", out)
+	}
+	key(tea.KeyDown) // past the end: stays
+	if out := ansi.Strip(d.Render(80, 24)); !strings.Contains(out, "line 60") {
+		t.Fatal("Down past the end lost the last line")
+	}
+	key(tea.KeyHome)
+	if out := ansi.Strip(d.Render(80, 24)); !strings.Contains(out, "line 01") {
+		t.Fatal("Home")
+	}
+	if a, _, _ := d.Update(tea.KeyMsg{Type: tea.KeyEsc}); a != "cancel" {
+		t.Fatal("Esc")
+	}
+	// A short body is untouched.
+	short := &Dialog{Title: "Short", Body: "one\ntwo", buttons: []DialogButton{{Label: "Close", Action: "cancel"}}}
+	if out := ansi.Strip(short.Render(80, 24)); strings.Contains(out, "scroll") || short.bodyRows != 0 {
+		t.Fatal("short body scrolled")
 	}
 }
