@@ -7,8 +7,9 @@
 # Writes ~/fyrtaarn-fixtures/<name>/ containing:
 #   ipmi/*.txt      exactly the ipmitool commands fyrtaarn runs
 #   redfish/*.json  unauthenticated probes, then an authenticated walk of
-#                   Systems, Managers (incl. NetworkProtocol and VirtualMedia
-#                   slots), Chassis
+#                   Systems and Managers (incl. log services with the first
+#                   page of entries, NetworkProtocol, VirtualMedia slots),
+#                   accounts, firmware inventory, Chassis
 #                   (thermal/power/sensors) and SessionService
 #   summary.txt     exit code / HTTP status and timing for every call
 #
@@ -159,14 +160,31 @@ rf noauth /redfish/v1/Systems/ >/dev/null
 # --- Redfish: authenticated walk ------------------------------------------
 rf auth /redfish/v1/SessionService/ >/dev/null
 
+# logs <file> : the log services linked from a System or Manager, each with
+# the first page of its entries (no paging: iDRAC's Lifecycle log alone runs
+# to thousands of entries).
+logs() {
+  local ls svc
+  ls=$(link "$1" LogServices)
+  [ -n "$ls" ] || return 0
+  for svc in $(members "$(rf auth "$ls")"); do
+    local e
+    e=$(link "$(rf auth "$svc")" Entries)
+    if [ -n "$e" ]; then
+      rf auth "$e" >/dev/null
+    fi
+  done
+}
+
 sys_col=$(rf auth /redfish/v1/Systems/)
 for s in $(members "$sys_col" | head -2); do
-  rf auth "$s" >/dev/null
+  logs "$(rf auth "$s")"
 done
 
 mgr_col=$(rf auth /redfish/v1/Managers/)
 for m in $(members "$mgr_col" | head -2); do
   mf=$(rf auth "$m")
+  logs "$mf"
   np=$(link "$mf" NetworkProtocol)
   if [ -n "$np" ]; then
     npf=$(rf auth "$np")
@@ -179,6 +197,20 @@ for m in $(members "$mgr_col" | head -2); do
       rf auth "$slot" >/dev/null
     done
   fi
+done
+
+# Accounts (user names, roles, enabled/locked; no passwords) and firmware
+# inventory, followed from the service root since paths differ (iLO ends
+# them in "/"; the iLO 4 has no UpdateService).
+root=$(rf auth /redfish/v1/)
+for svc_key in AccountService:Accounts UpdateService:FirmwareInventory; do
+  sl=$(link "$root" "${svc_key%%:*}")
+  [ -n "$sl" ] || continue
+  cl=$(link "$(rf auth "$sl")" "${svc_key##*:}")
+  [ -n "$cl" ] || continue
+  for item in $(members "$(rf auth "$cl")"); do
+    rf auth "$item" >/dev/null
+  done
 done
 
 ch_col=$(rf auth /redfish/v1/Chassis/)

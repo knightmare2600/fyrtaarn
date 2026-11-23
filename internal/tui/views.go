@@ -90,8 +90,17 @@ func (a *App) renderSensors() string {
 	b.WriteString(fmt.Sprintf("  %s\n", hdr.Render(fmt.Sprintf("%-25s %-22s %s", "Sensor", "Reading", "Status"))))
 	b.WriteString(fmt.Sprintf("  %s\n", strings.Repeat("─", 60)))
 
-	for _, e := range a.sensors[a.sdrOffset:end] {
-		b.WriteString(fmt.Sprintf("  %-25s %-22s %s\n", e.Name, e.Value, e.Status))
+	sel := lipgloss.NewStyle().Reverse(true)
+	for i, e := range a.sensors[a.sdrOffset:end] {
+		mark := "  "
+		if a.isWatched(hostIP, e.Name) {
+			mark = "★ "
+		}
+		line := fmt.Sprintf("%s%-25s %-22s %s", mark, e.Name, e.Value, e.Status)
+		if a.sdrOffset+i == a.sensorCursor {
+			line = sel.Render(line)
+		}
+		b.WriteString("  " + line + "\n")
 	}
 
 	return b.String()

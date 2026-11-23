@@ -3,17 +3,14 @@ package tui
 import (
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
-	"runtime"
 	"strings"
-	"syscall"
 	"time"
 	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/creack/pty"
 	"github.com/knightmare2600/fyrtaarn/internal/ipmi"
+	"github.com/knightmare2600/fyrtaarn/internal/ptyproc"
 )
 
 /* ---------------- MESSAGES ---------------- */
@@ -76,13 +73,12 @@ var (
 // of runes, tracks cursor position, and processes escape sequences so that
 // applications using cursor positioning (GRUB, vim, htop) render correctly.
 type solPane struct {
-	ptmx *os.File
-	cols int
-	rows int
-
-	// cmd is the ipmitool process; exited is closed once cmd.Wait() returns,
+	// con is the pseudo-terminal ipmitool runs in, with control of the
+	// process (see package ptyproc). exited is closed once its Wait returns,
 	// after exitErr has been set.
-	cmd     *exec.Cmd
+	con     ptyproc.Console
+	cols    int
+	rows    int
 	exited  chan struct{}
 	exitErr error
 
@@ -124,7 +120,7 @@ type solPane struct {
 	editBuf []rune
 }
 
-func newSolPane(ptmx *os.File, cols, rows int) *solPane {
+func newSolPane(con ptyproc.Console, cols, rows int) *solPane {
 	if cols < 1 {
 		cols = solDefaultCols
 	}
@@ -132,7 +128,7 @@ func newSolPane(ptmx *os.File, cols, rows int) *solPane {
 		rows = solDefaultRows
 	}
 	return &solPane{
-		ptmx:         ptmx,
+		con:          con,
 		cols:         cols,
 		rows:         rows,
 		grid:         makeGrid(rows, cols),
@@ -142,22 +138,18 @@ func newSolPane(ptmx *os.File, cols, rows int) *solPane {
 	}
 }
 
-// startSolProcess runs cmd inside a pty and returns a pane that owns both.
-// A goroutine reaps the process so it never lingers as a zombie and so
-// shutdown and listenSOL can tell when it has gone.
+// startSolProcess runs cmd inside a pseudo-terminal and returns a pane that
+// owns both. A goroutine reaps the process so it never lingers as a zombie
+// and so shutdown and listenSOL can tell when it has gone.
 func startSolProcess(cmd *exec.Cmd, cols, rows int) (*solPane, error) {
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
-		Rows: uint16(max(rows, solDefaultRows)),
-		Cols: uint16(max(cols, solDefaultCols)),
-	})
+	con, err := ptyproc.Start(cmd, max(cols, solDefaultCols), max(rows, solDefaultRows))
 	if err != nil {
 		return nil, err
 	}
-	p := newSolPane(ptmx, cols, rows)
-	p.cmd = cmd
+	p := newSolPane(con, cols, rows)
 	p.exited = make(chan struct{})
 	go func() {
-		p.exitErr = cmd.Wait()
+		p.exitErr = con.Wait()
 		close(p.exited)
 	}()
 	return p, nil
@@ -175,10 +167,7 @@ func makeGrid(rows, cols int) [][]rune {
 }
 
 func (s *solPane) resize(cols, rows int) {
-	_ = pty.Setsize(s.ptmx, &pty.Winsize{
-		Rows: uint16(max(rows, 1)),
-		Cols: uint16(max(cols, 1)),
-	})
+	_ = s.con.Resize(max(cols, 1), max(rows, 1))
 	newGrid := makeGrid(rows, cols)
 	for r := 0; r < rows && r < s.rows; r++ {
 		for c := 0; c < cols && c < s.cols; c++ {
@@ -197,7 +186,7 @@ func (s *solPane) write(b []byte) {
 	if len(b) == 0 {
 		return
 	}
-	_, _ = s.ptmx.Write(b)
+	_, _ = s.con.Write(b)
 	last := b[len(b)-1]
 	s.lastSentCR = last == '\r' || last == '\n'
 }
@@ -212,25 +201,26 @@ func (s *solPane) waitExit(d time.Duration) bool {
 	}
 }
 
-// shutdown ends the ipmitool process and only then closes the pty.
+// shutdown ends the ipmitool process and only then closes the console.
 //
-// Closing the pty first does nothing: pty.Open calls Fd(), which leaves the
-// master in blocking mode, and Go's os.File.Close on a blocking fd defers the
-// real close(2) until the in-flight Read in listenSOL returns. On an idle
-// console that never happens, so ipmitool kept running — and kept the BMC's
-// single SOL slot alive with its keepalives — after F10.
+// On Unix, closing the pty first does nothing: pty.Open calls Fd(), which
+// leaves the master in blocking mode, and Go's os.File.Close on a blocking fd
+// defers the real close(2) until the in-flight Read in listenSOL returns. On
+// an idle console that never happens, so ipmitool kept running — and kept
+// the BMC's single SOL slot alive with its keepalives — after F10.
 //
 // Escalation: escape + '.' (ipmitool deactivates the payload and closes its
-// session; only valid at the start of a line), then SIGINT (ipmitool's
-// handler sends Close Session), then SIGTERM, then SIGKILL. Returns true if
-// a signal was needed, meaning the payload may still be marked active and
-// the caller is to send an explicit "sol deactivate". A process that had
-// already exited on its own returns false — there is nothing of ours left
-// to release.
+// session; only valid at the start of a line), then the console's StopSteps:
+// SIGINT, SIGTERM, SIGKILL on Unix; Ctrl+C, then TerminateProcess on
+// Windows. SIGINT and Ctrl+C both reach ipmitool's handler, which sends
+// Close Session. Returns true if a step was needed, meaning the payload may
+// still be marked active and the caller is to send an explicit "sol
+// deactivate". A process that had already exited on its own returns false —
+// there is nothing of ours left to release.
 func (s *solPane) shutdown() (needDeactivate bool) {
 	select {
 	case <-s.exited:
-		_ = s.ptmx.Close()
+		_ = s.con.Close()
 		return false
 	default:
 	}
@@ -239,32 +229,28 @@ func (s *solPane) shutdown() (needDeactivate bool) {
 	// so ipmitool cannot block writing console output (or its own exit
 	// messages) into a full pty buffer while we wait for it to exit. The
 	// copy ends with EIO once ipmitool has gone.
-	go func() { _, _ = io.Copy(io.Discard, s.ptmx) }()
+	go func() { _, _ = io.Copy(io.Discard, s.con) }()
 
 	if s.lastSentCR {
 		s.write([]byte{ipmi.SOLEscapeChar, '.'})
 		if s.waitExit(solEscapeWait) {
-			_ = s.ptmx.Close()
+			_ = s.con.Close()
 			return s.exitErr != nil
 		}
 	}
 
 	needDeactivate = true
-	steps := []struct {
-		sig  syscall.Signal
-		wait time.Duration
-	}{
-		{syscall.SIGINT, solSigintWait},
-		{syscall.SIGTERM, solKillWait},
-		{syscall.SIGKILL, solKillWait},
-	}
-	for _, st := range steps {
-		_ = s.cmd.Process.Signal(st.sig)
-		if s.waitExit(st.wait) {
+	for _, st := range s.con.StopSteps() {
+		_ = st.Do()
+		wait := solKillWait
+		if st.Kind == ptyproc.Interrupt {
+			wait = solSigintWait
+		}
+		if s.waitExit(wait) {
 			break
 		}
 	}
-	_ = s.ptmx.Close()
+	_ = s.con.Close()
 	return needDeactivate
 }
 
@@ -706,9 +692,9 @@ func clampInt(v, lo, hi int) int {
 
 /* ---------------- COMMANDS ---------------- */
 
-// solPaneSupported reports whether the built-in SOL pane can run here. It
-// needs a pty; creack/pty has no Windows (ConPTY) implementation.
-var solPaneSupported = runtime.GOOS != "windows"
+// solPaneSupported reports whether the built-in SOL pane can run here: a
+// Unix pty, or ConPTY on Windows 10 1809 / Server 2019 and later.
+var solPaneSupported = ptyproc.Available()
 
 // solInUseMarker is the ipmitool message for an activation refused because
 // another session holds the BMC's SOL payload (completion code 0x80).
@@ -721,7 +707,7 @@ const solInUseMarker = "already active on another session"
 func startSOLPane(host, user, pass string, cols, rows int, takeover bool) tea.Cmd {
 	return func() tea.Msg {
 		if !solPaneSupported {
-			return solReadMsg{Err: fmt.Errorf("built-in SOL pane not supported on Windows")}
+			return solReadMsg{Err: fmt.Errorf("built-in SOL pane needs ConPTY (Windows 10 1809 or later)")}
 		}
 		// Error ignored: if nothing was active this fails fast, and a real
 		// connectivity problem surfaces again on the activate below.
@@ -757,7 +743,7 @@ func shutdownSOL(p *solPane, host, user, pass string) tea.Cmd {
 func listenSOL(p *solPane, gen int) tea.Cmd {
 	return func() tea.Msg {
 		buf := make([]byte, 4096)
-		n, err := p.ptmx.Read(buf)
+		n, err := p.con.Read(buf)
 		if n > 0 {
 			data := make([]byte, n)
 			copy(data, buf[:n])

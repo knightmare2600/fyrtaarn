@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 var (
@@ -28,8 +29,13 @@ func StatusBar(width int, left, right string) string {
 	l := " " + left
 	r := right + " "
 
-	lw := lipgloss.Width(l)
 	rw := lipgloss.Width(r)
+	// A message wider than the room left would wrap the bar onto further
+	// lines, leaving only its tail on screen; cut it to fit instead.
+	if room := width - rw - 1; lipgloss.Width(l) > room {
+		l = ansi.Truncate(l, max(room, 1), "…")
+	}
+	lw := lipgloss.Width(l)
 
 	gap := width - lw - rw
 	if gap < 0 {

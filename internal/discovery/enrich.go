@@ -1,10 +1,14 @@
 package discovery
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +48,14 @@ func EnrichResults(results []HostResult) []HostResult {
 			defer wg.Done()
 			rf, ok := probeRedfish(results[i].IP)
 			if !ok {
+				// No Redfish: try to recognise the web UI instead, so
+				// older BMCs still get a name.
+				if ui := probeWebUI(results[i].IP); ui != "" {
+					results[i].WebUI = ui
+					if results[i].Vendor == "" {
+						results[i].Vendor = ui
+					}
+				}
 				return
 			}
 			results[i].HasRedfish = true
@@ -157,4 +169,36 @@ func fetchRedfishSystem(client *http.Client, ip string) (manufacturer, model str
 	}
 
 	return strings.TrimSpace(sys.Manufacturer), strings.TrimSpace(sys.Model)
+}
+
+// webUITitles maps the <title> of a BMC's web front page to a name.
+// "Megarac SP" is the title of AMI MegaRAC SP firmware on the Quanta in
+// Tested Hardware (FW 7.54, 2008-09 GoAhead-Webs UI, no Redfish).
+var webUITitles = map[string]string{
+	"megarac sp": "AMI MegaRAC SP",
+}
+
+var titleRE = regexp.MustCompile(`(?is)<title>\s*(.*?)\s*</title>`)
+
+// probeWebUI fetches the BMC's HTTPS front page (old TLS included, through
+// the same client as the Redfish probe) and names the firmware from its
+// title, following redirects (the Quanta answers / with a 302 to
+// /index.html). Unrecognised or unreachable gives "".
+func probeWebUI(ip string) string {
+	resp, err := redfishClient().Get("https://" + ip + "/")
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if resp.Header.Get("Content-Encoding") == "gzip" {
+		if zr, err := gzip.NewReader(bytes.NewReader(body)); err == nil {
+			body, _ = io.ReadAll(io.LimitReader(zr, 64<<10))
+		}
+	}
+	m := titleRE.FindSubmatch(body)
+	if m == nil {
+		return ""
+	}
+	return webUITitles[strings.ToLower(string(m[1]))]
 }

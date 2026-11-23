@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/knightmare2600/fyrtaarn/internal/legacytls"
 )
 
 // VirtualMediaProvider is the interface each vendor backend must satisfy.
@@ -61,7 +59,7 @@ func httpClient() *http.Client {
 	return &http.Client{
 		Timeout: 10 * time.Second,
 		// Old BMCs may only speak TLS 1.0/1.1 or RC4; see legacytls.
-		Transport: legacytls.Transport(),
+		Transport: newTransport(),
 	}
 }
 
@@ -92,7 +90,7 @@ func (p *genericProvider) Insert(isoURL string) error {
 	c := httpClient()
 	base := "https://" + p.host
 
-	actionURL, err := findVMAction(c, base, p.user, p.pass, "InsertMedia")
+	actionURL, err := findVMActionKind(c, base, p.user, p.pass, "InsertMedia", KindForImage(isoURL))
 	if err != nil {
 		return fmt.Errorf("could not locate Redfish VirtualMedia InsertMedia action: %w", err)
 	}
@@ -108,98 +106,179 @@ func (p *genericProvider) Eject() error {
 	c := httpClient()
 	base := "https://" + p.host
 
+	// Eject whatever is inserted, in any slot. BMCs that do not report
+	// Inserted get the CD slot ejected, as before.
+	slots, err := vmSlots(c, base, p.user, p.pass)
+	if err != nil {
+		return fmt.Errorf("could not locate Redfish VirtualMedia slots: %w", err)
+	}
+	ejected, reported := 0, false
+	for _, sl := range slots {
+		in, has := sl.res["Inserted"].(bool)
+		reported = reported || has
+		if !sl.ok || !in {
+			continue
+		}
+		if t := slotAction(sl.res, "EjectMedia"); t != "" {
+			if err := doPost(c, base+t, p.user, p.pass, []byte("{}")); err != nil {
+				return fmt.Errorf("ejecting the %s slot: %w", sl.kind, err)
+			}
+			ejected++
+		}
+	}
+	if ejected > 0 || reported {
+		return nil // nothing inserted is not an error
+	}
+
 	actionURL, err := findVMAction(c, base, p.user, p.pass, "EjectMedia")
 	if err != nil {
 		return fmt.Errorf("could not locate Redfish VirtualMedia EjectMedia action: %w", err)
 	}
-
 	return doPost(c, actionURL, p.user, p.pass, []byte("{}"))
 }
 
 // findVMAction discovers the URL for actionName (InsertMedia or EjectMedia)
 // by walking Managers → VirtualMedia collection and returning the first
 // CD/DVD member that advertises the requested action.
-func findVMAction(c *http.Client, base, user, pass, actionName string) (string, error) {
-	// Fetch manager list.
+// MediaKind is the kind of virtual-media slot an image goes into.
+type MediaKind int
+
+const (
+	MediaCD        MediaKind = iota // CD/DVD slot: ISO images
+	MediaRemovable                  // USB stick / floppy slot: raw disk images
+)
+
+func (k MediaKind) String() string {
+	if k == MediaRemovable {
+		return "USB/floppy"
+	}
+	return "CD/DVD"
+}
+
+// KindForImage picks the slot for an image by its file extension: raw disk
+// and floppy images (.img, .ima, .vfd) go to the USB/floppy slot, anything
+// else to the CD/DVD slot.
+func KindForImage(name string) MediaKind {
+	n := strings.ToLower(name)
+	if i := strings.IndexAny(n, "?#"); i >= 0 {
+		n = n[:i] // URL query or fragment
+	}
+	for _, ext := range []string{".img", ".ima", ".vfd"} {
+		if strings.HasSuffix(n, ext) {
+			return MediaRemovable
+		}
+	}
+	return MediaCD
+}
+
+// vmSlot is one VirtualMedia resource and the kind of media it takes.
+type vmSlot struct {
+	path string
+	res  map[string]any
+	kind MediaKind
+	ok   bool // kind recognised; unrecognised slots are never used
+}
+
+// vmSlots walks Managers -> VirtualMedia and classifies each slot. A slot is
+// a CD slot by its path (descriptive vendors like iDRAC) or its MediaTypes
+// (numeric-path vendors like HP iLO, where path sniffing would miss it);
+// likewise a USB/floppy slot (iDRAC "RemovableDisk" with MediaTypes
+// USBStick; iLO slot 1 with Floppy and USBStick).
+func vmSlots(c *http.Client, base, user, pass string) ([]vmSlot, error) {
 	mgrs, err := fetchJSON(c, base+"/redfish/v1/Managers/", user, pass)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-
 	members, _ := jsonArrayOf(mgrs, "Members")
 	if len(members) == 0 {
-		return "", fmt.Errorf("no Managers found")
+		return nil, fmt.Errorf("no Managers found")
 	}
-
-	// Walk each manager looking for a VirtualMedia collection.
+	var slots []vmSlot
 	for _, m := range members {
 		mgrPath, _ := m["@odata.id"].(string)
 		if mgrPath == "" {
 			continue
 		}
-
 		mgr, err := fetchJSON(c, base+mgrPath, user, pass)
 		if err != nil {
 			continue
 		}
-
 		vmLink := jsonOdataID(mgr, "VirtualMedia")
 		if vmLink == "" {
 			continue
 		}
-
 		vmCol, err := fetchJSON(c, base+vmLink, user, pass)
 		if err != nil {
 			continue
 		}
-
 		vmMembers, _ := jsonArrayOf(vmCol, "Members")
 		for _, vm := range vmMembers {
 			vmPath, _ := vm["@odata.id"].(string)
 			if vmPath == "" {
 				continue
 			}
-
 			vmRes, err := fetchJSON(c, base+vmPath, user, pass)
 			if err != nil {
 				continue
 			}
-
-			// Accept CD/DVD slots identified by either the path (descriptive
-			// vendors like iDRAC) or the MediaTypes array (numeric-path vendors
-			// like HP iLO where path sniffing would miss the slot entirely).
+			slot := vmSlot{path: vmPath, res: vmRes}
 			lower := strings.ToLower(vmPath)
-			pathMatch := strings.Contains(lower, "cd") || strings.Contains(lower, "dvd")
-			typeMatch := vmHasMediaType(vmRes, "CD") || vmHasMediaType(vmRes, "DVD")
-			if !pathMatch && !typeMatch {
-				continue
+			switch {
+			case strings.Contains(lower, "cd") || strings.Contains(lower, "dvd") ||
+				vmHasMediaType(vmRes, "CD") || vmHasMediaType(vmRes, "DVD"):
+				slot.kind, slot.ok = MediaCD, true
+			case strings.Contains(lower, "removable") || strings.Contains(lower, "floppy") || strings.Contains(lower, "usb") ||
+				vmHasMediaType(vmRes, "USBStick") || vmHasMediaType(vmRes, "Floppy"):
+				slot.kind, slot.ok = MediaRemovable, true
 			}
+			slots = append(slots, slot)
+		}
+	}
+	return slots, nil
+}
 
-			// 1. Standard Redfish: Actions["#VirtualMedia.InsertMedia"].
-			if target := vmActionTarget(vmRes["Actions"], actionName); target != "" {
-				return base + target, nil
-			}
-
-			// 2. HP iLO 4+ OEM: Oem.Hp.Actions / Oem.Hpe.Actions.
-			// iLO uses "InsertVirtualMedia"/"EjectVirtualMedia" rather than
-			// the standard "InsertMedia"/"EjectMedia".
-			oemName := strings.ReplaceAll(actionName, "Media", "VirtualMedia")
-			if oem, ok := vmRes["Oem"].(map[string]any); ok {
-				for _, ns := range []string{"Hp", "Hpe"} {
-					if vendor, ok := oem[ns].(map[string]any); ok {
-						if t := vmActionTarget(vendor["Actions"], actionName); t != "" {
-							return base + t, nil
-						}
-						if t := vmActionTarget(vendor["Actions"], oemName); t != "" {
-							return base + t, nil
-						}
-					}
+// slotAction returns the target of actionName ("InsertMedia"/"EjectMedia")
+// on a slot: the standard action, or HP iLO's OEM one (Oem.Hp/Oem.Hpe
+// .Actions, named "InsertVirtualMedia"/"EjectVirtualMedia" on iLO 4).
+func slotAction(res map[string]any, actionName string) string {
+	if target := vmActionTarget(res["Actions"], actionName); target != "" {
+		return target
+	}
+	oemName := strings.ReplaceAll(actionName, "Media", "VirtualMedia")
+	if oem, ok := res["Oem"].(map[string]any); ok {
+		for _, ns := range []string{"Hp", "Hpe"} {
+			if vendor, ok := oem[ns].(map[string]any); ok {
+				if t := vmActionTarget(vendor["Actions"], actionName); t != "" {
+					return t
+				}
+				if t := vmActionTarget(vendor["Actions"], oemName); t != "" {
+					return t
 				}
 			}
 		}
 	}
+	return ""
+}
 
-	return "", fmt.Errorf("VirtualMedia %s action not found on any Manager", actionName)
+// findVMAction returns the URL of actionName on the first CD/DVD slot.
+func findVMAction(c *http.Client, base, user, pass, actionName string) (string, error) {
+	return findVMActionKind(c, base, user, pass, actionName, MediaCD)
+}
+
+// findVMActionKind returns the URL of actionName on the first slot of kind.
+func findVMActionKind(c *http.Client, base, user, pass, actionName string, kind MediaKind) (string, error) {
+	slots, err := vmSlots(c, base, user, pass)
+	if err != nil {
+		return "", err
+	}
+	for _, sl := range slots {
+		if sl.ok && sl.kind == kind {
+			if t := slotAction(sl.res, actionName); t != "" {
+				return base + t, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("no %s VirtualMedia slot with a %s action on any Manager", kind, actionName)
 }
 
 // vmActionTarget scans an Actions map (or Oem.Vendor.Actions map) and returns

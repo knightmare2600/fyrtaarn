@@ -80,6 +80,8 @@ func NewMenuBar() MenuBar {
 				Accel: 'B',
 				Items: []SubItem{
 					{Label: "IPMI over LAN...", Accel: 'I', Action: "ipmi-lan"},
+					{Label: "Redfish view...", Accel: 'R', Action: "redfish-view"},
+					{Label: "SOL settings...", Accel: 'S', Action: "sol-settings"},
 				},
 			},
 			{

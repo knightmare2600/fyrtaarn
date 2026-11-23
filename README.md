@@ -82,6 +82,7 @@ The name reflects the project's purpose: visibility, remote control, and infrast
 - **Network info** — IP address, MAC, subnet mask, gateway
 - **Chassis status** — power state, power fault, power overload, drive fault, cooling fault
 - **Sensor / SDR viewer** — scrollable live sensor readings; 90-second timeout for large repositories
+- **Sensor dashboard** — on the Sensors screen, `[Space]` marks sensors to watch (★, saved per host in `config.json`) and `[D]` opens a live dashboard of them: current value, unit, session minimum and maximum, and a trend graph, refreshed every 5 s (`[+]`/`[-]` for 2 s to 1 min, `[R]` now). A full sensor list walks the BMC's whole sensor repository (27 s for 85 sensors on the Quanta under Tested Hardware); the dashboard caches that repository once per session (`ipmitool sdr dump`, 5.5 s there) and then reads only its own sensors through the cache (`-S`, 0.3 s for four). Analog sensors only, as ipmitool's `sensor reading` reports no discrete states. Sensors read in Redfish-only mode have their own dashboard, refreshed from the Chassis Thermal and Power resources, with a separate list of chosen sensors (Redfish names differ from IPMI ones)
 - **System Event Log viewer** — scrollable, newest-first, colour-coded by severity:
   - Red — critical, IERR, fatal, failure
   - Orange — non-critical
@@ -90,12 +91,14 @@ The name reflects the project's purpose: visibility, remote control, and infrast
   - Cyan — informational (default)
 - **FRU / hardware inventory** — scrollable `ipmitool fru` output with device section headers
 - **Power control** — on, off, soft shutdown, reset; dialog shows current chassis power state
-- **SOL console** — Serial over LAN runs inside a TUI pane (`[O]` from BMC Info); ipmitool executes in a pty so the menu bar and status bar stay visible; full VT100/VT220 screen emulator (cols×rows character grid) — cursor positioning, clear-screen, scroll regions, insert/delete lines, erase-in-line/display, and all standard CSI sequences are honoured so GRUB menus, AMI/Award BIOS splashes, and interactive programs render correctly; bare `\r` (firmware line endings) and `\r\n` both handled; backspace is implemented as `ESC[D` + `Ctrl+D` (cursor-left then forward-delete) so it works correctly in GRUB's readline regardless of which erase character the BMC serial port uses; 1000-line scrollback history; `[F10]` disconnects cleanly — ipmitool is told to exit and the BMC's SOL slot is released before a new session can start, so reconnecting works straight away; ipmitool runs with Ctrl+] as its escape character so `~.` typed at the start of a line reaches the console instead of killing the session; if ipmitool exits on its own its last message is shown in the status bar; if another session already holds the BMC's SOL console, a dialog asks before taking it over (default Cancel) — the BMC cannot tell a colleague's live console from one left behind by a crashed client; menu-bar mouse clicks are ignored while SOL is open, as F9 is; **not available on Windows builds** (needs ConPTY) — `[O]` shows the equivalent ipmitool command to run in a terminal instead; `[PgUp/PgDn]` scroll; all keys including F1–F12 forwarded to the BMC; Ctrl+C forwarded rather than quitting the app; pressing `[O]` performs a live chassis power check — if the chassis is off a dialog offers to power it on and open SOL immediately so the full boot sequence is captured from BIOS POST; if the chassis is already on SOL opens directly without a dialog
-- **Virtual media** — Redfish ISO mount and eject via `InsertMedia`/`EjectMedia` actions; walks `Managers → VirtualMedia` to find the CD/DVD slot (`[V]` from BMC Info; requires Redfish-capable host); accepts an HTTP(S) URL or a local file path — a local ISO is served to the BMC from an ad-hoc HTTP server on this machine (random URL path, local address chosen by route to the BMC) for as long as it stays mounted, stopped on eject, on mounting another image, or on exit; Supermicro hosts are probed for Redfish VirtualMedia first and IKVM-only firmware gets a clear unsupported error
-- **Virtual media without Redfish (AMI MegaRAC SP)** — on a BMC that has no Redfish, `[V]` Mount attaches a local file as the server's virtual CD-ROM through AMI's IUSB media redirection, the protocol the Java JViewer console uses (`internal/iusb`); no Java needed. Fyrtaarn logs in to the BMC's web interface with the same credentials (`internal/amiweb`), takes the media token from the JViewer launch file, connects to the CD port (5120) and answers the server's SCSI reads from the file on demand, so there is no size limit; the image stays attached until Eject or exit. Upload to BMC (LMedia) stores an image of up to 16 MiB on the BMC itself instead, behind a warning dialog: it switches the BMC's Local Media setting on and blocks the BMC's other requests while uploading. The 16 MiB limit is not reported by any BMC call; it is hard-coded in the BMC's own upload page
+- **SOL console** — Serial over LAN runs inside a TUI pane (`[O]` from BMC Info); ipmitool executes in a pty so the menu bar and status bar stay visible; full VT100/VT220 screen emulator (cols×rows character grid) — cursor positioning, clear-screen, scroll regions, insert/delete lines, erase-in-line/display, and all standard CSI sequences are honoured so GRUB menus, AMI/Award BIOS splashes, and interactive programs render correctly; bare `\r` (firmware line endings) and `\r\n` both handled; backspace is implemented as `ESC[D` + `Ctrl+D` (cursor-left then forward-delete) so it works correctly in GRUB's readline regardless of which erase character the BMC serial port uses; 1000-line scrollback history; `[F10]` disconnects cleanly — ipmitool is told to exit and the BMC's SOL slot is released before a new session can start, so reconnecting works straight away; ipmitool runs with Ctrl+] as its escape character so `~.` typed at the start of a line reaches the console instead of killing the session; if ipmitool exits on its own its last message is shown in the status bar; if another session already holds the BMC's SOL console, a dialog asks before taking it over (default Cancel) — the BMC cannot tell a colleague's live console from one left behind by a crashed client; menu-bar mouse clicks are ignored while SOL is open, as F9 is; on Windows the pane runs ipmitool in a pseudo-console (ConPTY, Windows 10 1809 / Server 2019 or later), and on older Windows `[O]` shows the equivalent ipmitool command to run in a terminal instead; `[PgUp/PgDn]` scroll; all keys including F1–F12 forwarded to the BMC; Ctrl+C forwarded rather than quitting the app; pressing `[O]` performs a live chassis power check — if the chassis is off a dialog offers to power it on and open SOL immediately so the full boot sequence is captured from BIOS POST; if the chassis is already on SOL opens directly without a dialog
+- **Virtual media** — Redfish image mount and eject via `InsertMedia`/`EjectMedia` actions; walks `Managers → VirtualMedia` to find the slot for the image (`.iso` → CD/DVD; `.img`, `.ima`, `.vfd` → USB/floppy), and Eject removes whatever is mounted (`[V]` from BMC Info; requires Redfish-capable host); accepts an HTTP(S) URL or a local file path — a local ISO is served to the BMC from an ad-hoc HTTP server on this machine (random URL path, local address chosen by route to the BMC) for as long as it stays mounted, stopped on eject, on mounting another image, or on exit; Supermicro hosts are probed for Redfish VirtualMedia first and IKVM-only firmware gets a clear unsupported error
+- **Virtual media without Redfish (AMI MegaRAC SP)** — on a BMC that has no Redfish, `[V]` Mount attaches a local file through AMI's IUSB media redirection — `.iso` as the server's virtual CD-ROM, `.img`/`.ima`/`.vfd` as a floppy (up to 2.88 MB) or a USB disk, served read-only with 512-byte blocks and write protection reported to the host —, the protocol the Java JViewer console uses (`internal/iusb`); no Java needed. Fyrtaarn logs in to the BMC's web interface with the same credentials (`internal/amiweb`), takes the media token from the JViewer launch file, connects to the CD port (5120) and answers the server's SCSI reads from the file on demand, so there is no size limit; the image stays attached until Eject or exit. Upload to BMC (LMedia) stores an image of up to 16 MiB on the BMC itself instead, behind a warning dialog: it switches the BMC's Local Media setting on and blocks the BMC's other requests while uploading. The 16 MiB limit is not reported by any BMC call; it is hard-coded in the BMC's own upload page
 - **Web UI proxy** — `[W]` from the results list or BMC Info serves the selected BMC's HTTPS web interface on `http://127.0.0.1:<port>/`, so any modern browser can use it, however old the BMC's TLS. No old OpenSSL, VM or container is needed: fyrtaarn makes the BMC connection itself (see Legacy TLS below). The dialog shows the local URL, the TLS version and cipher negotiated with the BMC (with a warning when it is obsolete), and the `ssh -L` line to use when fyrtaarn runs on another machine. Absolute redirects and links back to the BMC are rewritten to the local address; cookies lose `Secure`/`Domain` so the browser keeps the login session over local HTTP. Listens on localhost only; one proxy per BMC, running until Stop Proxy or exit. Java KVM consoles connect to their own ports directly and are not proxied
 - **Legacy TLS** — every HTTPS connection fyrtaarn makes to a BMC (Redfish, scan enrichment, web UI proxy) accepts TLS 1.0 and 1.1 and the old CBC, 3DES and RC4-SHA suites through Go's TLS library, and falls back to a built-in TLS 1.0/1.1 RC4-MD5/RC4-SHA client for BMCs Go cannot reach at all, such as 2009-era AMI MegaRAC SP firmware whose only usable suite is RC4-MD5. Modern BMCs still negotiate TLS 1.3/1.2 as before. Certificates are not verified, as before (BMCs use self-signed certificates)
 - **IPMI over LAN on/off** — when a connect fails with no IPMI session and the BMC has Redfish, fyrtaarn checks the BMC's Redfish `NetworkProtocol` resource; if IPMI over LAN is switched off it says so and offers to switch it on (default Cancel), then retries the connect. BMC > IPMI over LAN... shows the selected host's current state and switches it either way. The change is a Redfish `PATCH` of `IPMI.ProtocolEnabled`, read back afterwards: a BMC that accepts it but keeps the old value is reported as a failure. The dialog notes IPMI 2.0's password-hash exposure (CVE-2013-4786)
+- **SOL settings** — BMC > SOL settings... shows whether the BMC offers SOL, its bit rate and required privilege, and whether the logged-in user may use SOL, and offers to switch SOL on or off and to allow the user (Cancel focused). Uses channel 14 ("this channel"), so no per-vendor LAN channel number. The server must still redirect its console to the BMC's serial port in its own BIOS/UEFI setup, which differs by vendor; the dialog says so rather than guessing. Reading checked on the Quanta; the changes are untested on hardware
+- **Redfish-only mode** — for a BMC with IPMI over LAN off, or none: BMC > Redfish view... (or Use Redfish only in the IPMI over LAN dialog, so IPMI can stay off) shows the system and manager details over Redfish, and from there `[S]` reads sensors from the Chassis Thermal and Power resources (temperatures, fans, voltages, power draw; absent parts skipped), `[P]` offers power actions from the BMC's own list of allowed reset types (never NMI; Cancel focused), `[L]` the event log (every Systems and Managers log service, first page each, newest first), `[U]` user accounts (shown read-only: their IDs are not IPMI user IDs), `[F]` the firmware inventory, `[V]` virtual media and `[W]` the web UI. Checked against captured Redfish responses of an iDRAC9 4.20, an iLO 4 2.54 (whose fans use `FanName`/`CurrentReading`/`Units` instead of the standard names) and an iLO 5 1.40; the power actions are untested on hardware
 - **Direct connect** — File > Connect to BMC opens a dialog (IP, username, password) and connects without running a scan; host is added to the results tree so all subsequent operations work normally, and gets the same reverse-DNS and Redfish enrichment a scan gives it
 - **Recent Connections** — File > Recent Connections lists the last 5 hosts connected to, newest first, one entry per IP; selecting one reconnects straight away if this session already holds its credentials, otherwise opens Connect to BMC pre-filled with IP and username. Saved to `config.json` (IP and username only)
 - **Favourites** — up to 15 pinned hosts under File > Favourites, each with an optional name (shown as `Name — IP (user)`); File > Favourites > Manage Favourites... adds (`[A]`), edits (`[Enter]`) and deletes (`[D]`) them. The form's password box is session-only: it goes into the in-memory credential cache so the favourite connects without prompting until you quit, and is never written to disk. Saved to `config.json` (name, IP and username only)
@@ -106,7 +109,7 @@ The name reflects the project's purpose: visibility, remote control, and infrast
 - Per-vendor virtual media via `redfish.VirtualMediaProvider`, selected by manufacturer in `redfish.NewProvider`; everything else is vendor-neutral through ipmitool
 - One IPMI session per BMC at a time — mc info, lan print and chassis status are fetched sequentially, and every ipmitool call takes a per-host lock; some BMCs (iDRAC9) refuse overlapping session set-ups with "insufficient resources for session"
 - Per-command timeouts — 15 s for single-round-trip commands; 90 s for bulk SDR/SEL reads
-- Passwords never on a command line — ipmitool gets the session password via its environment (`-E` with `IPMITOOL_PASSWORD`), so it does not show up in `ps`; new BMC user passwords are typed into ipmitool's own prompts through a pty (on Windows, which has no pty support, the new password is still passed as an argument)
+- Passwords never on a command line — ipmitool gets the session password via its environment (`-E` with `IPMITOOL_PASSWORD`), so it does not show up in `ps`; new BMC user passwords are typed into ipmitool's own prompts through a pseudo-terminal — a pty on Unix, ConPTY on Windows 10 1809 / Server 2019 and later (only older Windows still passes the new password as an argument)
 - ipmitool credential string zeroed from memory after each command
 - Structured file logger (`internal/logging`) — level-filtered, RFC3339 timestamps, defaults to discard (opt-in)
 - Scan progress bar — status bar shows `[████░░░] 89/256 · 3 found` during nmap scans; CIDR host count is the denominator; nmap `--stats-every 2s` drives the bar; `</host>` closures in the XML stream increment the found counter
@@ -149,9 +152,12 @@ The name reflects the project's purpose: visibility, remote control, and infrast
 ### Virtual Media
 
 - Per-vendor backends — current implementation uses a generic Redfish walker
-  that handles iDRAC 9, HP iLO 4 (via its `Oem.Hp.Actions`) and Supermicro
-  MegaRAC; XCC is untested; vendors without Redfish VirtualMedia need their
-  own backend:
+  that handles iDRAC 9, HP iLO 4 (via its `Oem.Hp.Actions`), iLO 5 (standard
+  actions) and Supermicro MegaRAC; checked on 2026-11-23 against captured
+  Redfish responses of an iDRAC9 4.20, an iLO 4 2.54 and an iLO 5 1.40, where
+  it picks the CD slot's Insert/Eject actions on each; XCC is untested; vendors
+  without Redfish VirtualMedia need their own backend, and each waits for a
+  BMC to test it on:
   - `ilo.go` — iLO 3 via RIBCL (no Redfish); iLO 5/6 session-token auth
     (iLO 4 needs no backend — the generic walker handles it)
   - `drac.go` — iDRAC 7/8 via WSMAN; iDRAC 9 Redfish + Dell OEM RemoteImage extension
@@ -163,24 +169,34 @@ The name reflects the project's purpose: visibility, remote control, and infrast
 - Generic Redfish fallback: replace path-sniffing slot discovery with `MediaTypes`
   array inspection so numeric and non-descriptive slot paths are found correctly
   (done — the generic walker accepts a slot by path or by `MediaTypes`)
-- Floppy / USB image support
+- Floppy / USB image support (done: Redfish USB/floppy slot, and AMI MegaRAC SP floppy and hard-disk redirection)
 - Remote media redirection
-- AMI MegaRAC SP (pre-Redfish): CD-ROM redirection is done (see BMC Management); floppy (port
-  5122) and hard-disk (5123) redirection use the same IUSB framing and are not built yet;
-  encrypted media ports (5124/5126/5127, `-vmsecure 1`) are not supported yet
+- AMI MegaRAC SP (pre-Redfish): CD-ROM, floppy and hard-disk redirection are done (see BMC
+  Management), including secure mode (`-vmsecure 1`: TLS around the same stream, as JViewer's
+  `PacketMaster.connectVmediaSSl` does); secure mode tested on the Quanta
 - Surface BMC-reachability requirement to user (ISO URL must be accessible by the
   BMC, not the client) (done — the mount dialog says so; local files are
   served to the BMC automatically since 0.6.3)
 
 ### Providers
 
-Full vendor-specific implementations for:
-- SuperMicro
-- Quanta
-- Dell DRAC
-- HP iLO
-- Oracle ILOM
-- Lenovo XCC
+What each vendor gets today, and how far it has been checked. "Capture" means checked against a
+read-only `scripts/fy-capture.sh` capture of that BMC, "hardware" means used on the BMC itself
+(see Tested Hardware).
+
+| Vendor / BMC | IPMI (info, sensors, SOL, power, users) | Virtual media | Other |
+|---|---|---|---|
+| Dell iDRAC9 | Hardware (FW 4.20) | Generic Redfish walker, CD and USB slots: capture | Redfish-only mode sensors: capture |
+| Dell iDRAC 7/8 | Untested | Not built (needs WS-Man); no hardware to test on | |
+| HPE iLO 4 | Hardware (FW 2.54); `-C 3` after its cipher-list failure | Redfish `Oem.Hp` actions: hardware for CD (earlier), capture for USB | |
+| HPE iLO 5 | Connect after switching IPMI over LAN on: hardware (FW 1.40) | Standard Redfish actions: capture | IPMI over LAN switch: hardware |
+| HPE iLO 3 / 6 | Untested | iLO 3 needs RIBCL, not built; iLO 6 untested | |
+| Quanta, AMI MegaRAC SP (no Redfish) | Hardware (FW 7.54); `-C 3` after its suite refusal | AMI IUSB redirection, CD / floppy / USB disk, plain or TLS (secure mode): sessions accepted on hardware, no sector reads yet (server off); LMedia fails on this firmware | Web UI proxy over RC4-MD5: hardware |
+| Supermicro (own firmware) | Untested | Redfish VirtualMedia probe, then the generic walker; untested | |
+| Oracle ILOM, Lenovo XCC, Cisco CIMC | Untested | Generic Redfish walker may work; no dedicated backend; untested | |
+
+The files `internal/redfish/{ilo,drac,lom,xcc,cimc}.go` are placeholders for vendor backends that
+need hardware to build and test against.
 
 ---
 
@@ -196,10 +212,10 @@ Confirmed on real hardware — connect (BMC Info), SOL console, and SOL close/re
 
 Earlier, separately: Redfish enumeration and virtual media on HP iLO 4 (ProLiant ML310e Gen8 v2, FW 2.54) — see `internal/redfish/ilo.go`.
 
-The Quanta's web interface speaks TLS 1.0 at most, with NULL-MD5, RC4-MD5 and two 40-bit export suites only, and it has no Redfish. Checked from the development machine on 2026-11-23, before release:
+The Quanta's web interface speaks TLS 1.0 at most, with NULL-MD5, RC4-MD5 and two 40-bit export suites only, and it has no Redfish. Checked from the development machine on 2026-11-23 with the code released as 0.8.0 (web UI proxy from 0.7.0):
 
 - Web UI proxy: login and authenticated pages work (built-in RC4-MD5 client).
-- Virtual media: Mount attaches an ISO through AMI media redirection (session accepted on port 5120, held, and released by Eject); the server was powered off, so no sector reads have been observed yet.
+- Virtual media: Mount attaches an ISO through AMI media redirection (session accepted on port 5120, held, and released by Eject); a floppy image on port 5122 and a disk image on 5123 likewise, and a CD over TLS on 5124 with media encryption switched on (then switched back off). The server was powered off, so no sector reads have been observed yet.
 - LMedia (Upload to BMC): **fails** — the BMC accepts the upload but answers status -1 when asked to register it, for a formatted FAT12 floppy and for a valid ISO alike, and identically when the browser's own requests are replayed with curl.
 - Firmware bug: requesting `/Java/jviewer.jnlp` without the `EXTRNIP` query parameter the BMC's own page adds makes the BMC write `(null)` as its host and crashes its web server, which stays down until `ipmitool mc reset cold`. Fyrtaarn always sends `EXTRNIP`, and the web UI proxy rewrites it to the BMC's address.
 
@@ -387,6 +403,9 @@ sudo ./dist/fyrtaarn
 | Enter                  | Results           | Connect (or reconnect)                        |
 | W                      | Results, BMC Info | Web UI via local proxy                        |
 | S                      | BMC Info          | Load sensor list (SDR)                        |
+| Space                  | Sensors           | Watch / unwatch sensor on the dashboard       |
+| D                      | Sensors           | Open the sensor dashboard                     |
+| + / - / R              | Dashboard         | Refresh slower / faster / now                 |
 | L                      | BMC Info          | Load event log (SEL)                          |
 | F                      | BMC Info          | Load FRU / hardware inventory                 |
 | U                      | BMC Info          | Load user account list                        |
@@ -403,6 +422,10 @@ sudo ./dist/fyrtaarn
 | N                      | User list         | Create new user                               |
 | F9 > Connect to BMC    | Global            | Connect directly without scanning             |
 | F9 > BMC > IPMI over LAN | Results         | Check or switch IPMI over LAN (Redfish)       |
+| F9 > BMC > Redfish view | Results          | Manage the host over Redfish only             |
+| F9 > BMC > SOL settings | Results          | Check or switch SOL and your SOL access       |
+| S / L / U / F          | Redfish view      | Sensors / event log / users / firmware        |
+| P / V / W              | Redfish view      | Power / virtual media / web UI                |
 | F9 > Export            | Results           | Export inventory to CSV / JSON                |
 | F9 > Start Log         | Global            | Begin session log to file                     |
 | F9 > Stop Log          | Global            | End session log                               |
@@ -497,6 +520,26 @@ For detailed technical writeups and excellent explanations of:
 ---
 
 ## Changelog
+
+### 0.8.0
+
+- **Redfish session login** — when a BMC refuses HTTP basic auth (401), fyrtaarn opens a Redfish session (POST to the Sessions collection found from the service root: `Links.Sessions`, or iLO 4's `links.Sessions.href`), uses its `X-Auth-Token`, logs in again if it expires, and logs all sessions out on exit. A session is tied to host, user and password, so a wrong password never rides on an earlier session. BMCs that accept basic auth behave as before. Tested against a fake BMC with basic auth off; untested on hardware
+- **SOL settings** — BMC > SOL settings... checks and switches SOL on the BMC (`ipmitool sol set enabled`) and the logged-in user's SOL access (`sol payload`), both on channel 14; BIOS console redirection stays the server's own setting and is explained, not attempted
+- **Redfish view: event log, users, firmware** — `[L]`, `[U]` and `[F]` on the Redfish view read the log services (first page of each), AccountService accounts and UpdateService firmware inventory, shown on the event log, Users and FRU screens; Redfish accounts are always read-only there, as their IDs are not IPMI user IDs. Built to the DMTF schemas and tested against a fake BMC; `scripts/fy-capture.sh` now collects these resources (read-only) so real BMCs can be checked
+- **Scans name BMCs without Redfish** — when the Redfish probe fails, fyrtaarn fetches the HTTPS front page (old TLS included) and recognises the web UI by its title; the Quanta is now listed as "AMI MegaRAC SP" (vendor and a new "web UI" detail line), for scans and direct connects alike. Checked live on the Quanta: 0.4 s including the failed Redfish probe
+- **Sensor dashboard over Redfish** — in Redfish-only mode, `[Space]` and `[D]` on the Sensors screen now open a dashboard refreshed from the Chassis Thermal and Power resources; the chosen sensors are saved separately from the IPMI ones
+- **Windows: new BMC user passwords off the command line** — `user set password` on Windows now answers ipmitool's prompts through ConPTY, as Unix does through a pty, instead of passing the password as an argument; only Windows older than 10 1809 keeps the argument. The SOL console and the prompts now share one pseudo-terminal package (`internal/ptyproc`). Untested on Windows
+- **AMI media redirection in secure mode** — when the BMC's launch file says `-vmsecure 1`, the media connection is made in TLS (any certificate accepted, as JViewer does) with the same protocol inside, through `legacytls` for these BMCs' old TLS. Tested on the Quanta on 2026-11-23: with media encryption switched on, its launch file moves the drives to ports 5124/5126/5127 and fyrtaarn's CD session over TLS was accepted and ejected cleanly; the setting was then switched back off
+- **AMI MegaRAC SP: floppy and USB disk images** — `.img`, `.ima` and `.vfd` images attach as a floppy (up to 2.88 MB, port 5122) or a USB disk (port 5123), read-only. The disk command set, error encoding and the hard-disk "drive type" exchange come from disassembling the BMC's own JViewer native library (`libjavaharddiskwrapper.so`, not stripped); sessions on both ports were accepted by the Quanta
+- **Status bar: long messages** — a status wider than the terminal wrapped the bar onto further lines and only its last words showed; it is now cut to one line with an ellipsis, keeping its start
+- **Virtual media: USB and floppy images on Redfish BMCs** — `.img`, `.ima` and `.vfd` images now mount in the USB/floppy slot (iDRAC `RemovableDisk`, iLO slot 1) and `.iso` in the CD/DVD slot; Eject ejects whatever is mounted in any slot instead of only the CD. Slot choice checked against captured responses of an iDRAC9 4.20, an iLO 4 2.54 and an iLO 5 1.40; mounting a disk image is untested on hardware
+- **Redfish-only mode** — BMC > Redfish view..., or Use Redfish only when a connect finds IPMI over LAN off: system details, sensors (Chassis Thermal/Power), power actions limited to the BMC's allowed reset types, virtual media and web UI, all without IPMI (`internal/redfish/chassis.go`, `power.go`)
+- **Dialogs: long button rows wrap** — rows of buttons wider than the screen now wrap onto further rows instead of running off the edge
+- **Users: real enabled state** — `ipmitool user list` has no enabled column, so a named user was always shown as enabled; on the Quanta that showed a disabled account as enabled. The Users screen now takes each user's Enable Status from `ipmitool channel getaccess 14` (channel 14 is "this channel" in the IPMI spec, so no per-vendor LAN channel number); BMCs that do not answer it keep the old name-based guess
+- **FRU: empty devices explained** — devices ipmitool reports as "Device not present (...)" now show that line under their header instead of an empty section (four such devices on the ML310e's iLO 4)
+- **Sensor dashboard** — `[Space]` on the Sensors screen picks sensors, `[D]` shows them live with min, max and a trend graph, refreshed every 2 s to 1 min; the sensor repository is cached once per session so each refresh reads only the chosen sensors (0.3 s against 27 s for a full list on the Quanta)
+- **Quanta / old AMI BMCs with ipmitool 1.8.19+** — ipmitool 1.8.19 picks a cipher suite from the BMC's list when no `-C` is given, and the Quanta (FW 7.54) refuses that pick with "no matching cipher suite" although `-C 3` works, so fyrtaarn could not connect to it at all. On that refusal fyrtaarn now retries once with `-C 3` and keeps the host on it
+- **SOL console on Windows** — the built-in SOL pane now runs on Windows 10 1809 / Server 2019 and later, with ipmitool in a pseudo-console (ConPTY, via `charmbracelet/x/conpty`). Closing it works as on Unix: ipmitool's escape sequence first, then Ctrl+C (Windows' counterpart of SIGINT, which ipmitool answers with Close Session), then TerminateProcess, followed by `sol deactivate`. Older Windows keeps the dialog showing the ipmitool command to run instead. Needs an `ipmitool.exe` on PATH
 
 ### 0.7.1
 

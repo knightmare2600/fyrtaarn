@@ -85,12 +85,15 @@ func NewVirtualMediaDialog(redfish bool) *Dialog {
 	inp.Width = 50
 	inp.Focus()
 
-	body := "Mount or eject a virtual ISO image via Redfish.\n" +
+	body := "Mount or eject a virtual image via Redfish.\n" +
+		".iso goes in the CD/DVD slot; .img, .ima and .vfd\n" +
+		"(disk and floppy images) in the USB/floppy slot.\n" +
 		"Enter an HTTP(S) URL, or a local file path — a local\n" +
 		"path is served to the BMC automatically from this\n" +
 		"machine for as long as the image stays mounted.\n" +
 		"A URL is fetched by the BMC itself, so it must be\n" +
-		"reachable from the BMC's network, not just from here."
+		"reachable from the BMC's network, not just from here.\n" +
+		"Eject removes whatever is mounted."
 	buttons := []DialogButton{
 		{Label: "Mount", Action: "vm-mount"},
 		{Label: "Eject", Action: "vm-eject"},
@@ -99,8 +102,9 @@ func NewVirtualMediaDialog(redfish bool) *Dialog {
 	if !redfish {
 		inp.Placeholder = "~/isos/image.iso"
 		body = "This BMC has no Redfish. Mount attaches a local file\n" +
-			"as the server's virtual CD through AMI MegaRAC media\n" +
-			"redirection (what the Java console does). The image\n" +
+			"through AMI MegaRAC media redirection (what the Java\n" +
+			"console does): .iso as a CD, .img/.ima/.vfd as a\n" +
+			"floppy (up to 2.88 MB) or a USB disk. The image\n" +
 			"is read from this machine on demand, any size, and\n" +
 			"stays attached until Eject or fyrtaarn exits.\n\n" +
 			"Upload to BMC stores a small image on the BMC itself\n" +
@@ -745,12 +749,26 @@ func (d *Dialog) Render(w, h int) string {
 	}
 
 	if len(d.buttons) > 0 {
-		var parts []string
+		// Wrap onto further rows rather than run past the screen edge (a
+		// BMC can offer six or more power actions). The modal's border,
+		// padding and shadow take about 12 columns.
+		limit := max(w-12, 30)
+		row, rowW := "", 0
 		for i, btn := range d.buttons {
-			parts = append(parts, renderButton(btn.Label, d.focus == len(d.inputs)+i, btn.Disabled))
+			part := renderButton(btn.Label, d.focus == len(d.inputs)+i, btn.Disabled)
+			pw := lipgloss.Width(part)
+			if rowW > 0 && rowW+1+pw > limit {
+				b.WriteString(row + "\n")
+				row, rowW = "", 0
+			}
+			if rowW > 0 {
+				row += " "
+				rowW++
+			}
+			row += part
+			rowW += pw
 		}
-		b.WriteString(strings.Join(parts, " "))
-		b.WriteString("\n")
+		b.WriteString(row + "\n")
 	}
 
 	b.WriteString("\n[Tab] Next  [Enter] Select  [Esc] Cancel")

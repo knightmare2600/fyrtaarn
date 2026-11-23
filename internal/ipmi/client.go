@@ -4,15 +4,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/creack/pty"
+	"github.com/knightmare2600/fyrtaarn/internal/ptyproc"
 )
 
 const (
@@ -48,6 +46,13 @@ func lockHost(host string) func() {
 // (ipmi_find_best_cipher_suite in src/plugins/lanplus/lanplus.c).
 const noCipherListMarker = "Unable to Get Channel Cipher Suites"
 
+// noSuiteMarker is the open-session refusal for a suite the BMC will not
+// use. ipmitool 1.8.19+ picks the best suite from the BMC's list when no -C
+// is given; on the Quanta in Tested Hardware (AMI, FW 7.54) that pick is
+// refused although "channel getciphers" lists only suites 0-3 and 6-8, and
+// -C 3 works. Such hosts are retried once with -C 3 and kept on it.
+const noSuiteMarker = "no matching cipher suite"
+
 var suite3Hosts sync.Map
 
 func noteCipherFallback(host, output string) {
@@ -57,6 +62,23 @@ func noteCipherFallback(host, output string) {
 }
 
 func runIPMICommand(
+	host string,
+	user string,
+	pass string,
+	timeout time.Duration,
+	command ...string,
+) (string, error) {
+	out, err := runIPMIKeepOutput(host, user, pass, timeout, command...)
+	if err != nil {
+		return "", err
+	}
+	return out, nil
+}
+
+// runIPMIKeepOutput is runIPMICommand, but returns ipmitool's stdout even
+// when it exits non-zero, for commands that report per-item failures but
+// still print the items that worked (sensor reading).
+func runIPMIKeepOutput(
 	host string,
 	user string,
 	pass string,
@@ -73,22 +95,30 @@ func runIPMICommand(
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := ipmitoolCmd(ctx, host, user, pass, command...)
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	noteCipherFallback(host, stderr.String())
+	var stdout, stderr bytes.Buffer
+	var err error
+	for attempt := 0; attempt < 2; attempt++ {
+		_, suite3 := suite3Hosts.Load(host)
+		stdout.Reset()
+		stderr.Reset()
+		cmd := ipmitoolCmd(ctx, host, user, pass, command...)
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err = cmd.Run()
+		noteCipherFallback(host, stderr.String())
+		// ipmitool chose a suite itself and the BMC refused it: retry
+		// once with -C 3, still under this host's lock.
+		if err == nil || suite3 || !strings.Contains(stderr.String(), noSuiteMarker) {
+			break
+		}
+		suite3Hosts.Store(host, struct{}{})
+	}
 
 	if err != nil {
 		if ctx.Err() != nil {
-			return "", fmt.Errorf("ipmitool timed out after %v — BMC may be slow or unreachable", timeout)
+			return stdout.String(), fmt.Errorf("ipmitool timed out after %v — BMC may be slow or unreachable", timeout)
 		}
-		return "", fmt.Errorf("ipmitool: %s", strings.TrimSpace(stderr.String()))
+		return stdout.String(), fmt.Errorf("ipmitool: %s", strings.TrimSpace(stderr.String()))
 	}
 
 	return stdout.String(), nil
@@ -124,9 +154,9 @@ func ipmitoolCmd(ctx context.Context, host, user, pass string, command ...string
 	return cmd
 }
 
-// ptySupported reports whether creack/pty can start processes here; it has
-// no Windows implementation.
-var ptySupported = runtime.GOOS != "windows"
+// ptySupported reports whether a pseudo-terminal can be started here: a
+// Unix pty, or ConPTY on Windows 10 1809 / Server 2019 and later.
+var ptySupported = ptyproc.Available()
 
 // runIPMIPrompted runs an ipmitool command that reads secrets interactively
 // (getpass on /dev/tty), answering each prompt in turn, so the secrets never
@@ -143,9 +173,9 @@ func runIPMIPrompted(
 	command ...string,
 ) (string, error) {
 	if !ptySupported {
-		// No pty here (creack/pty has no Windows/ConPTY support), so getpass
+		// No pseudo-terminal here (Windows before 10 1809), so getpass
 		// would have no terminal. Pass the answer as the final argument
-		// instead — on this platform only, as every platform did before
+		// instead — on such systems only, as every platform did before
 		// prompted input existed. Checked before taking the host lock,
 		// which runIPMICommand takes itself.
 		return runIPMICommand(host, user, pass, timeout, append(command, answers[0])...)
@@ -158,10 +188,21 @@ func runIPMIPrompted(
 	defer cancel()
 
 	cmd := ipmitoolCmd(ctx, host, user, pass, command...)
-	ptmx, err := pty.Start(cmd)
+	ptmx, err := ptyproc.Start(cmd, 80, 24)
 	if err != nil {
 		return "", fmt.Errorf("ipmitool: %w", err)
 	}
+	// On Unix exec.CommandContext kills ipmitool when ctx expires; a ConPTY
+	// process is not started through exec, so kill it here as well.
+	exited := make(chan struct{})
+	defer close(exited)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = ptyproc.KillNow(ptmx)
+		case <-exited:
+		}
+	}()
 
 	// Reader: ends with EIO once ipmitool exits and the slave side closes.
 	var (
@@ -214,10 +255,10 @@ func runIPMIPrompted(
 		if !waitPrompts(i + 1) {
 			break
 		}
-		_, _ = io.WriteString(ptmx, ans+"\n")
+		_, _ = ptmx.Write(append([]byte(ans), ptyproc.Enter...))
 	}
 
-	waitErr := cmd.Wait()
+	waitErr := ptmx.Wait()
 	<-readDone
 	_ = ptmx.Close()
 	noteCipherFallback(host, output())
@@ -442,6 +483,13 @@ func parseFRU(data string) []FRUEntry {
 	var entries []FRUEntry
 
 	for _, line := range strings.Split(data, "\n") {
+		// An empty FRU device is reported under its header as " Device not
+		// present (<reason>)" (ipmi_fru.c), with no colon; keep it so the
+		// header does not stand alone.
+		if t := strings.TrimSpace(line); strings.HasPrefix(t, "Device not present") {
+			entries = append(entries, FRUEntry{Field: "Status", Value: t})
+			continue
+		}
 		parts := strings.SplitN(line, ":", 2)
 		if len(parts) != 2 {
 			continue

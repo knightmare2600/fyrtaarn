@@ -37,6 +37,7 @@ const (
 	screenFirmware
 	screenRedfish
 	screenSOL
+	screenDashboard
 )
 
 const maxRecentConnections = 5
@@ -179,6 +180,32 @@ type App struct {
 	ipmiLanHost        string
 	ipmiLanFromConnect bool
 
+	// Sensor dashboard (dashboard.go): the running dashboard, the sensors
+	// chosen per host (saved in config), hosts whose sensor repository is
+	// cached this session, and the Sensors screen's cursor.
+	dash         *dashboard
+	dashSensors  map[string][]string
+	sdrCached    map[string]bool
+	sensorCursor int
+
+	// redfishOnly: the Redfish screen was opened without an IPMI session
+	// (redfishonly.go), so Esc goes back to the host list.
+	// sensorsFromRedfish: the Sensors screen shows Redfish readings, which
+	// the IPMI-based dashboard cannot refresh.
+	redfishOnly        bool
+	sensorsFromRedfish bool
+	// usersFromRedfish: the Users screen lists Redfish accounts, whose IDs
+	// are not IPMI user IDs, so its IPMI actions are blocked.
+	// backToRedfish: the event log / FRU / users screen was opened from
+	// the Redfish view, so Esc returns there.
+	usersFromRedfish bool
+	backToRedfish    bool
+
+	// solCfgHost/solCfgUserID: the host and user the SOL settings dialog
+	// is about (solcfg.go).
+	solCfgHost   string
+	solCfgUserID int
+
 	// mouseReleased is true while mouse reporting is off (see syncMouse).
 	mouseReleased bool
 
@@ -294,6 +321,7 @@ func NewApp() *App {
 		nvdAPIKey:         cfg.NVDAPIKey,
 		recentConnections: recent,
 		favourites:        favs,
+		dashSensors:       cfg.DashboardSensors,
 		isRoot:            util.IsRoot(),
 	}
 	a.refreshRecentMenu()
@@ -498,6 +526,16 @@ func runVMAction(host, isoURL, user, pass, manufacturer, action string) tea.Cmd 
 		}
 		return vmMsg{Action: action, Err: err}
 	}
+}
+
+// infoScreen is where the event log, FRU and users screens go back to: the
+// Redfish view when they were opened from it (or in Redfish-only mode,
+// where there is no BMC Info), otherwise BMC Info.
+func (a *App) infoScreen() screen {
+	if a.backToRedfish || a.redfishOnly {
+		return screenRedfish
+	}
+	return screenMCInfo
 }
 
 // statusShowFor is how long a new status message replaces the key hints.
@@ -839,8 +877,15 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				r.RedfishManufacturer = msg.host.RedfishManufacturer
 				r.RedfishModel = msg.host.RedfishModel
 			}
+			if msg.host.WebUI != "" {
+				r.WebUI = msg.host.WebUI
+			}
 		}
-		a.applyDirectVendor(msg.host.IP, msg.host.RedfishManufacturer)
+		vendor := msg.host.RedfishManufacturer
+		if vendor == "" {
+			vendor = msg.host.WebUI
+		}
+		a.applyDirectVendor(msg.host.IP, vendor)
 		return a, nil
 
 	case redfishModelMsg:
@@ -890,6 +935,7 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				modelCmd = fetchRedfishModel(hostIP, a.username, a.password)
 			}
 		}
+		a.redfishOnly = false
 		a.mcInfo = msg.Info
 		a.lanInfo = msg.LAN
 		a.chassis = msg.Chassis
@@ -911,7 +957,9 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.sensors = msg.Entries
+		a.sensorsFromRedfish = false
 		a.sdrOffset = 0
+		a.sensorCursor = 0
 		a.currentScreen = screenSensor
 		a.status = fmt.Sprintf("%d sensors", len(a.sensors))
 		return a, nil
@@ -928,6 +976,7 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			entries[i], entries[j] = entries[j], entries[i]
 		}
 		a.selEntries = entries
+		a.backToRedfish = false
 		a.selOffset = 0
 		a.currentScreen = screenSEL
 		a.status = fmt.Sprintf("%d events", len(a.selEntries))
@@ -941,6 +990,7 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.fru = msg.Entries
+		a.backToRedfish = false
 		a.fruOffset = 0
 		a.currentScreen = screenFRU
 		a.status = fmt.Sprintf("%d FRU fields", len(a.fru))
@@ -954,6 +1004,7 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.users = msg.Entries
+		a.usersFromRedfish, a.backToRedfish = false, false
 		a.usersOffset = 0
 		a.selectedUser = 0
 		a.currentScreen = screenUsers
@@ -1182,6 +1233,36 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.activeDialog = NewWebUIDialog(msg.Proxy)
 		return a, nil
 
+	case rfSensorsMsg:
+		return a.handleRFSensors(msg)
+
+	case rfPowerInfoMsg:
+		return a.handleRFPowerInfo(msg)
+
+	case rfResetMsg:
+		return a.handleRFReset(msg)
+
+	case solCfgMsg:
+		return a.handleSOLCfg(msg)
+
+	case rfLogMsg:
+		return a.handleRFLog(msg)
+
+	case rfUsersMsg:
+		return a.handleRFUsers(msg)
+
+	case rfFirmwareMsg:
+		return a.handleRFFirmware(msg)
+
+	case dashDumpMsg:
+		return a.handleDashDump(msg)
+
+	case dashReadMsg:
+		return a.handleDashRead(msg)
+
+	case dashTickMsg:
+		return a.handleDashTick(msg)
+
 	case ipmiLanMsg:
 		return a.handleIPMILanMsg(msg)
 
@@ -1196,8 +1277,8 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.amiMediaStop, a.amiMediaHost = msg.Stop, msg.Host
-		a.status = fmt.Sprintf("%s attached to %s as a virtual CD; it stays attached until Eject or exit", msg.Path, msg.Host)
-		a.logf("Attached %s to %s via AMI media redirection", msg.Path, msg.Host)
+		a.status = fmt.Sprintf("%s attached to %s as a virtual %s; it stays attached until Eject or exit", msg.Path, msg.Host, msg.Dev)
+		a.logf("Attached %s to %s as %s via AMI media redirection", msg.Path, msg.Host, msg.Dev)
 		return a, waitAMIMedia(msg.Host, msg.Done)
 
 	case amiMediaEndedMsg:
@@ -1205,9 +1286,9 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.amiMediaStop, a.amiMediaHost = nil, ""
 		}
 		if msg.Err != nil {
-			a.status = "Virtual CD on " + msg.Host + " detached: " + msg.Err.Error()
+			a.status = "Virtual drive on " + msg.Host + " detached: " + msg.Err.Error()
 		} else {
-			a.status = "Virtual CD on " + msg.Host + " detached"
+			a.status = "Virtual drive on " + msg.Host + " detached"
 		}
 		a.logf("AMI media redirection to %s ended: %v", msg.Host, msg.Err)
 		return a, nil
@@ -1230,10 +1311,14 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.Action == "eject" {
 				a.status = "Virtual media ejected"
 			} else {
-				a.status = "ISO mounted via Redfish"
+				a.status = "Image mounted via Redfish"
 			}
 		}
-		a.currentScreen = screenMCInfo
+		if a.redfishOnly {
+			a.currentScreen = screenRedfish // no IPMI session, so no BMC Info
+		} else {
+			a.currentScreen = screenMCInfo
+		}
 		return a, nil
 
 	case exportMsg:
@@ -1338,6 +1423,8 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a.updateRedfishEnum(msg)
 		case screenSOL:
 			return a.updateSOL(msg)
+		case screenDashboard:
+			return a.updateDashboard(msg)
 		case screenAbout:
 			// About is now an activeDialog — this case is unreachable but kept
 			// as a safety fallback.
@@ -1358,6 +1445,10 @@ func (a *App) handleMenuAction(action string) (tea.Model, tea.Cmd) {
 		return a, a.quit()
 	case action == "ipmi-lan":
 		return a.openIPMILan()
+	case action == "redfish-view":
+		return a.openRedfishView()
+	case action == "sol-settings":
+		return a.openSOLSettings()
 	case action == "connect-bmc-dialog":
 		a.activeDialog = NewConnectBMCDialog("", a.username)
 		return a, textinput.Blink
@@ -1417,11 +1508,21 @@ func (a *App) handleMenuAction(action string) (tea.Model, tea.Cmd) {
 /* ---------------- DIALOG ACTIONS ---------------- */
 
 func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
+	if strings.HasPrefix(action, "rfpower:") {
+		return a.rfPowerAction(action)
+	}
+	if strings.HasPrefix(action, "solcfg-") {
+		return a.solCfgAction(action)
+	}
 	switch action {
 
 	case "cancel":
 		a.activeDialog = nil
 		return a, nil
+
+	case "redfish-view":
+		a.activeDialog = nil
+		return a.openRedfishView()
 
 	case "ipmilan-on", "ipmilan-off":
 		a.activeDialog = nil
@@ -1639,7 +1740,7 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 		if !host.HasRedfish {
 			if a.amiMediaHost == host.IP && a.amiMediaStop != nil {
 				a.stopAMIMedia() // the ended message reports the detach
-				a.status = "Detaching virtual CD from " + host.IP
+				a.status = "Detaching virtual drive from " + host.IP
 			} else {
 				a.status = "No image attached to " + host.IP + " by this session"
 			}
@@ -1882,6 +1983,7 @@ func (a *App) quit() tea.Cmd {
 		a.isoServerStop = nil
 	}
 	a.stopAMIMedia()
+	_ = redfish.CloseSessions() // log out any Redfish sessions fyrtaarn opened
 	for host, p := range a.webProxies {
 		_ = p.Close()
 		delete(a.webProxies, host)
@@ -2131,16 +2233,35 @@ func (a *App) updateSensor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "esc", "q":
-		a.currentScreen = screenMCInfo
+		if a.sensorsFromRedfish {
+			a.currentScreen = screenRedfish
+		} else {
+			a.currentScreen = screenMCInfo
+		}
 	case "up", "k":
-		if a.sdrOffset > 0 {
-			a.sdrOffset--
+		if a.sensorCursor > 0 {
+			a.sensorCursor--
 		}
 	case "down", "j":
-		if a.sdrOffset < maxOffset {
-			a.sdrOffset++
+		if a.sensorCursor < len(a.sensors)-1 {
+			a.sensorCursor++
 		}
+	case " ", "space":
+		if len(a.sensors) > 0 {
+			name := a.sensors[a.sensorCursor].Name
+			a.toggleWatch(a.results[a.selectedHost].IP, name)
+		}
+	case "d":
+		return a.openDashboard()
 	}
+	// Keep the cursor on screen.
+	if a.sensorCursor < a.sdrOffset {
+		a.sdrOffset = a.sensorCursor
+	}
+	if a.sensorCursor >= a.sdrOffset+visibleLines {
+		a.sdrOffset = a.sensorCursor - visibleLines + 1
+	}
+	a.sdrOffset = max(0, min(a.sdrOffset, maxOffset))
 
 	return a, nil
 }
@@ -2160,7 +2281,7 @@ func (a *App) updateSEL(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "esc", "q":
-		a.currentScreen = screenMCInfo
+		a.currentScreen = a.infoScreen()
 	case "up", "k":
 		if a.selOffset > 0 {
 			a.selOffset--
@@ -2189,7 +2310,7 @@ func (a *App) updateFRU(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "esc", "q":
-		a.currentScreen = screenMCInfo
+		a.currentScreen = a.infoScreen()
 	case "up", "k":
 		if a.fruOffset > 0 {
 			a.fruOffset--
@@ -2213,7 +2334,7 @@ func (a *App) updateUsers(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "esc", "q":
-		a.currentScreen = screenMCInfo
+		a.currentScreen = a.infoScreen()
 
 	case "up", "k":
 		if a.selectedUser > 0 {
@@ -2232,6 +2353,10 @@ func (a *App) updateUsers(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "enter":
+		if a.usersFromRedfish {
+			a.status = "Accounts read over Redfish are shown read-only; their IDs are not IPMI user IDs"
+			return a, nil
+		}
 		if len(a.users) == 0 {
 			return a, nil
 		}
@@ -2241,6 +2366,10 @@ func (a *App) updateUsers(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case "n":
+		if a.usersFromRedfish {
+			a.status = "Accounts read over Redfish are shown read-only; their IDs are not IPMI user IDs"
+			return a, nil
+		}
 		a.activeDialog = NewCreateUserDialog()
 		return a, textinput.Blink
 	}
@@ -2292,9 +2421,16 @@ func (a *App) updateRedfishEnum(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		maxOffset = 0
 	}
 
+	if m, c, handled := a.redfishScreenKey(msg.String()); handled {
+		return m, c
+	}
 	switch msg.String() {
 	case "esc", "q":
-		a.currentScreen = screenMCInfo
+		if a.redfishOnly {
+			a.currentScreen = screenResults
+		} else {
+			a.currentScreen = screenMCInfo
+		}
 	case "up", "k":
 		if a.redfishOffset > 0 {
 			a.redfishOffset--
@@ -2445,6 +2581,8 @@ func (a *App) View() string {
 				content = a.renderRedfishEnum()
 			case screenSOL:
 				content = a.renderSOL()
+			case screenDashboard:
+				content = a.renderDashboard()
 			case screenAbout:
 				content = a.aboutView()
 			default:
@@ -2607,6 +2745,9 @@ func (a *App) renderResults() string {
 				first := strings.SplitN(strings.TrimSpace(h.IPMIScript), "\n", 2)[0]
 				b.WriteString(fmt.Sprintf("     ├─ ipmi:       %s\n", strings.TrimSpace(first)))
 			}
+			if h.WebUI != "" {
+				b.WriteString(fmt.Sprintf("     ├─ web UI:     %s\n", h.WebUI))
+			}
 			if h.HasRedfish {
 				b.WriteString(fmt.Sprintf("     ├─ redfish:    v%s\n", h.RedfishVersion))
 				if h.RedfishManufacturer != "" || h.RedfishModel != "" {
@@ -2751,8 +2892,11 @@ func (a *App) screenStatusHint() string {
 		if end > total {
 			end = total
 		}
-		return fmt.Sprintf("Showing %d–%d of %d  [↑/k] Up  [↓/j] Down  [ESC] Back",
-			a.sdrOffset+1, end, total)
+		return fmt.Sprintf("%d/%d  [↑↓/jk] Move  [Space] Watch  [D] Dashboard (%d watched)  [ESC] Back",
+			a.sensorCursor+1, total, len(a.watched(a.results[a.selectedHost].IP)))
+
+	case screenDashboard:
+		return "[+/-] Refresh interval  [R] Refresh now  [ESC] Back to sensors"
 
 	case screenSEL:
 		total := len(a.selEntries)
@@ -2802,7 +2946,7 @@ func (a *App) screenStatusHint() string {
 		return "[F10] Disconnect  [PgUp] Scroll up  — all other keys forwarded to BMC"
 
 	case screenRedfish:
-		return "[↑/k] Up  [↓/j] Down  [ESC] Back"
+		return "[S] Sensors  [L] Log  [U] Users  [F] Firmware  [P] Power  [V] Virtual Media  [W] Web UI  (Redfish)  [ESC] Back"
 
 	}
 

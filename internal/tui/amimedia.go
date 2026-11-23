@@ -9,11 +9,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/knightmare2600/fyrtaarn/internal/amiweb"
 	"github.com/knightmare2600/fyrtaarn/internal/iusb"
+	"github.com/knightmare2600/fyrtaarn/internal/legacytls"
+	"github.com/knightmare2600/fyrtaarn/internal/redfish"
 )
 
 // Virtual media for BMCs without Redfish: AMI MegaRAC SP network media
@@ -23,6 +26,7 @@ import (
 type amiMediaMsg struct {
 	Host string
 	Path string
+	Dev  iusb.Device
 	Stop func()
 	Done <-chan error // receives once, when the redirection ends
 	Err  error
@@ -80,15 +84,17 @@ func startAMIMedia(host, user, pass, path string) tea.Cmd {
 			return fail(notAMIError(err))
 		}
 		mp, err := web.MediaPorts()
-		if err == nil && mp.Secure {
-			err = errors.New("the BMC requires encrypted media redirection, which fyrtaarn does not support yet")
+		dev := amiDevice(path, st.Size())
+		port := map[iusb.Device]int{iusb.CDROM: mp.CDPort, iusb.Floppy: mp.FDPort, iusb.HardDisk: mp.HDPort}[dev]
+		if err == nil && port == 0 {
+			err = fmt.Errorf("the BMC's launch file gives no %s port", dev)
 		}
 		if err != nil {
 			web.Logout()
 			_ = f.Close()
 			return fail(err)
 		}
-		s, err := iusb.Dial(net.JoinHostPort(host, strconv.Itoa(mp.CDPort)), mp.Token, 0)
+		s, err := dialMedia(net.JoinHostPort(host, strconv.Itoa(port)), mp.Token, dev, mp.Secure)
 		if err != nil {
 			web.Logout()
 			_ = f.Close()
@@ -96,13 +102,47 @@ func startAMIMedia(host, user, pass, path string) tea.Cmd {
 		}
 		done := make(chan error, 1)
 		go func() {
-			err := s.ServeCD(f, st.Size(), nil)
+			var err error
+			if dev == iusb.CDROM {
+				err = s.ServeCD(f, st.Size(), nil)
+			} else {
+				err = s.ServeDisk(f, st.Size(), nil)
+			}
 			_ = f.Close()
 			web.Logout()
 			done <- err
 		}()
-		return amiMediaMsg{Host: host, Path: path, Stop: func() { _ = s.Close() }, Done: done}
+		return amiMediaMsg{Host: host, Path: path, Dev: dev, Stop: func() { _ = s.Close() }, Done: done}
 	}
+}
+
+// dialMedia connects to a media port, in TLS when the BMC's media
+// redirection is set to secure (-vmsecure 1 in its launch file). These BMCs'
+// TLS is old (TLS 1.0, RC4 on the Quanta), so legacytls dials it.
+func dialMedia(addr, token string, dev iusb.Device, secure bool) (*iusb.Session, error) {
+	if !secure {
+		return iusb.DialDevice(addr, token, dev, 0)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	conn, err := legacytls.Dial(ctx, "tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("secure media port %s: %w", addr, err)
+	}
+	return iusb.NewSession(conn, token, dev, 0)
+}
+
+// amiDevice picks the virtual drive for an image: disk and floppy images
+// (.img, .ima, .vfd) go to the floppy drive up to 2.88 MB and to the hard
+// disk above that; anything else is a CD image.
+func amiDevice(path string, size int64) iusb.Device {
+	if redfish.KindForImage(path) != redfish.MediaRemovable {
+		return iusb.CDROM
+	}
+	if size <= 2949120 {
+		return iusb.Floppy
+	}
+	return iusb.HardDisk
 }
 
 // waitAMIMedia turns the end of a redirection into a message.

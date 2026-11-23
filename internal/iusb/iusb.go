@@ -115,39 +115,92 @@ func readFrame(r io.Reader) (header, []byte, error) {
 	return h, p, nil
 }
 
-func authFrame(token string, instance byte) []byte {
+// Device is the kind of virtual drive a session redirects; the BMC tells
+// them apart by port (JViewer's -cdport, -fdport, -hdport).
+type Device int
+
+const (
+	CDROM Device = iota
+	Floppy
+	HardDisk // also USB keys
+)
+
+func (d Device) String() string {
+	switch d {
+	case Floppy:
+		return "floppy"
+	case HardDisk:
+		return "hard disk"
+	}
+	return "CD-ROM"
+}
+
+// authFrame builds the session-token auth packet. JViewer puts the device
+// number in header byte 23 for CD-ROM and floppy (CDROMRedir, FloppyRedir)
+// but byte 22 for hard disks (HarddiskRedir.SendAuth_SessionToken).
+func authFrame(token string, dev Device, num byte) []byte {
 	p := make([]byte, authPayloadLen)
 	p[envOpcode] = opAuth
 	p[envStatus] = 0 // token type: web session
 	copy(p[envText:], token)
-	h := newHeader(len(p), instance, 0)
+	h := newHeader(len(p), 0, 0)
+	if dev == HardDisk {
+		h[22] = num
+	} else {
+		h[offInstance] = num
+	}
+	h = newHeaderFrom(h)
 	return append(h[:], p...)
 }
 
-// Session is an authenticated connection to one BMC virtual CD-ROM.
+// newHeaderFrom recomputes h's checksum after a field was changed.
+func newHeaderFrom(h header) header {
+	h[offChecksum] = 0
+	var sum byte
+	for _, b := range h {
+		sum += b
+	}
+	h[offChecksum] = -sum
+	return h
+}
+
+// Session is an authenticated connection to one BMC virtual drive.
 type Session struct {
-	conn     net.Conn
-	instance byte
+	conn net.Conn
+	dev  Device
 }
 
 // Dial connects to the BMC's CD port and authenticates with token.
 func Dial(addr, token string, instance byte) (*Session, error) {
+	return DialDevice(addr, token, CDROM, instance)
+}
+
+// DialDevice connects to the port for dev and authenticates with token.
+func DialDevice(addr, token string, dev Device, num byte) (*Session, error) {
 	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil {
 		return nil, err
 	}
-	s := &Session{conn: conn, instance: instance}
-	if err := s.auth(token); err != nil {
+	return NewSession(conn, token, dev, num)
+}
+
+// NewSession authenticates over an established connection: plain TCP, or
+// TLS for the BMC's secure media ports. JViewer's secure mode is TLS that
+// accepts any certificate around the same IUSB stream
+// (PacketMaster.connectVmediaSSl). The connection is closed on failure.
+func NewSession(conn net.Conn, token string, dev Device, num byte) (*Session, error) {
+	s := &Session{conn: conn, dev: dev}
+	if err := s.auth(token, num); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
 	return s, nil
 }
 
-func (s *Session) auth(token string) error {
+func (s *Session) auth(token string, num byte) error {
 	_ = s.conn.SetDeadline(time.Now().Add(15 * time.Second))
 	defer func() { _ = s.conn.SetDeadline(time.Time{}) }()
-	if _, err := s.conn.Write(authFrame(token, s.instance)); err != nil {
+	if _, err := s.conn.Write(authFrame(token, s.dev, num)); err != nil {
 		return err
 	}
 	_, p, err := readFrame(s.conn)
@@ -165,7 +218,7 @@ func (s *Session) auth(token string) error {
 		if by != "" {
 			return ErrInUse{By: by}
 		}
-		return fmt.Errorf("iusb: BMC refused the session (status %d): token rejected or device in use", p[envStatus])
+		return fmt.Errorf("iusb: BMC refused the %s session (status %d): token rejected or device in use", s.dev, p[envStatus])
 	}
 	return nil
 }
@@ -214,7 +267,14 @@ func (s *Session) ServeCD(img io.ReaderAt, size int64, onCmd func(Stats)) error 
 // respond echoes the request envelope with the data appended and its length
 // in both length fields; offset 25 is the one the BMC forwards to the host.
 func (s *Session) respond(req header, env, data []byte) error {
-	p := make([]byte, len(env)+len(data))
+	return s.respondStatus(req, env, data, nil, nil)
+}
+
+// respondStatus is respond with a SCSI error in the status bytes and/or
+// extra bytes after the data that the length fields do not count (the
+// drive type JViewer appends to its 0xF4 answer).
+func (s *Session) respondStatus(req header, env, data []byte, sn *sense, extra []byte) error {
+	p := make([]byte, len(env)+len(data), len(env)+len(data)+len(extra))
 	copy(p, env)
 	copy(p[len(env):], data)
 	if len(p) >= envXferLen+4 {
@@ -223,7 +283,62 @@ func (s *Session) respond(req header, env, data []byte) error {
 	if len(p) >= envRespLen+4 {
 		binary.LittleEndian.PutUint32(p[envRespLen:], uint32(len(data)))
 	}
+	if len(p) > envOverallStatus+3 {
+		if sn != nil {
+			p[envOverallStatus], p[envOverallStatus+1], p[envOverallStatus+2], p[envOverallStatus+3] = 1, sn.key, sn.asc, sn.ascq
+		} else {
+			p[envOverallStatus], p[envOverallStatus+1], p[envOverallStatus+2], p[envOverallStatus+3] = 0, 0, 0, 0
+		}
+	}
+	p = append(p, extra...)
 	h := newHeader(len(p), req[offInstance], binary.LittleEndian.Uint32(req[offSeq:]))
+	// Echo the request's device fields (number, interface, client data,
+	// instance: bytes 20-23); hard disks carry their number in byte 22.
+	copy(h[20:24], req[20:24])
+	h = newHeaderFrom(h)
 	_, err := s.conn.Write(append(h[:], p...))
 	return err
+}
+
+// ServeDisk answers a floppy or hard-disk session's SCSI requests from img,
+// read-only, until the BMC ends it or the connection closes (see disk.go).
+func (s *Session) ServeDisk(img io.ReaderAt, size int64, onCmd func(Stats)) error {
+	d := &disk{img: img, size: size}
+	var st Stats
+	for {
+		h, p, err := readFrame(s.conn)
+		if err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+				return nil
+			}
+			return err
+		}
+		if len(p) <= envOpcode {
+			continue
+		}
+		switch p[envOpcode] {
+		case opKill:
+			return nil
+		case opSetHarddiskType:
+			// JViewer's native handler fails this as an unknown opcode;
+			// HarddiskRedir.run then appends the drive type byte.
+			var extra []byte
+			if s.dev == HardDisk {
+				extra = []byte{driveTypeImage}
+			}
+			if err := s.respondStatus(h, p, nil, senseInvalidOpcode, extra); err != nil {
+				return err
+			}
+			continue
+		}
+		data, sn := d.handle(p)
+		st.Commands++
+		st.Bytes += int64(len(data))
+		if err := s.respondStatus(h, p, data, sn, nil); err != nil {
+			return err
+		}
+		if onCmd != nil {
+			onCmd(st)
+		}
+	}
 }

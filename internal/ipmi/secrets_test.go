@@ -28,6 +28,23 @@ if os.environ.get("FAKE_NO_CIPHER_LIST") and "-C" not in sys.argv:
     # iLO 4 does not answer Get Channel Cipher Suites; ipmitool 1.8.19+
     # prints this, then falls back to suite 3 (lanplus.c).
     print("Unable to Get Channel Cipher Suites", file=sys.stderr)
+if os.environ.get("FAKE_NO_SUITE") and "-C" not in sys.argv:
+    # The Quanta (AMI FW 7.54) refuses ipmitool 1.8.19's own suite choice.
+    with open(os.path.join(d, "refused"), "a") as f:
+        f.write("x")
+    print("Error in open session response message : no matching cipher suite", file=sys.stderr)
+    sys.exit(1)
+if "reading" in sys.argv:
+    # ipmitool "sensor reading": printf "%-16s | %s" per sensor; an unknown
+    # name is reported on stderr and makes the exit status 1.
+    rc = 0
+    for n in sys.argv[sys.argv.index("reading") + 1:]:
+        if n == "Missing":
+            print('Sensor "%s" not found!' % n, file=sys.stderr)
+            rc = 1
+        else:
+            print("%-16s | %s" % (n, {"Inlet Temp": "26.000", "Fan1 RPM": "4800"}.get(n, "1.5")))
+    sys.exit(rc)
 if os.environ.get("FAKE_FAIL"):
     print("Error: Unable to establish IPMI v2 / RMCP+ session", file=sys.stderr)
     sys.exit(1)
@@ -186,5 +203,50 @@ func TestCipherSuite3Fallback(t *testing.T) {
 	}
 	if hasC3() {
 		t.Fatal("unaffected host got -C 3")
+	}
+}
+
+// TestNoMatchingSuiteRetry checks a BMC that refuses ipmitool's own suite
+// choice is retried once with -C 3, and kept on it afterwards.
+func TestNoMatchingSuiteRetry(t *testing.T) {
+	dir := fakeIPMITool(t)
+	t.Setenv("FAKE_NO_SUITE", "1")
+	const host = "10.9.9.4"
+	t.Cleanup(func() { suite3Hosts.Delete(host) })
+
+	out, err := runIPMICommand(host, "u", "p", 5*time.Second, "mc", "info")
+	if err != nil || strings.TrimSpace(out) != "ok" {
+		t.Fatalf("retry did not succeed: %q %v", out, err)
+	}
+	if got := readFile(t, filepath.Join(dir, "refused")); got != "x" {
+		t.Fatalf("refusals %q, want exactly one", got)
+	}
+	if _, err := runIPMICommand(host, "u", "p", 5*time.Second, "mc", "info"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, filepath.Join(dir, "refused")); got != "x" {
+		t.Fatalf("second call was refused again: %q", got)
+	}
+	if !strings.Contains(readFile(t, filepath.Join(dir, "argv")), "\x00-C\x003\x00") {
+		t.Fatal("second call lacks -C 3")
+	}
+}
+
+// TestSOLSetCommands checks the exact ipmitool commands for switching SOL
+// and a user's SOL payload access (syntax from ipmi_sol.c, channel 14).
+func TestSOLSetCommands(t *testing.T) {
+	dir := fakeIPMITool(t)
+	argv := func() string { return readFile(t, filepath.Join(dir, "argv")) }
+	if err := SetSOLEnabled("10.9.9.5", "u", "p", true); err != nil || !strings.HasSuffix(argv(), "\x00sol\x00set\x00enabled\x00true\x0014") {
+		t.Fatalf("enable: %v %q", err, argv())
+	}
+	if err := SetSOLEnabled("10.9.9.5", "u", "p", false); err != nil || !strings.HasSuffix(argv(), "\x00enabled\x00false\x0014") {
+		t.Fatalf("disable: %v %q", err, argv())
+	}
+	if err := SetSOLPayload("10.9.9.5", "u", "p", 3, true); err != nil || !strings.HasSuffix(argv(), "\x00sol\x00payload\x00enable\x0014\x003") {
+		t.Fatalf("payload: %v %q", err, argv())
+	}
+	if err := SetSOLPayload("10.9.9.5", "u", "p", 0, true); err == nil {
+		t.Fatal("user ID 0 accepted")
 	}
 }

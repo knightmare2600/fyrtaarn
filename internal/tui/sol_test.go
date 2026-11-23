@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/knightmare2600/fyrtaarn/internal/ptyproc"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -36,9 +38,7 @@ func startTestPane(t *testing.T, name string, args ...string) *solPane {
 		t.Fatalf("start %s: %v", name, err)
 	}
 	t.Cleanup(func() {
-		if p.cmd.Process != nil {
-			_ = p.cmd.Process.Kill()
-		}
+		_ = ptyproc.KillNow(p.con)
 	})
 	return p
 }
@@ -49,7 +49,7 @@ func blockedReader(p *solPane) chan struct{} {
 	go func() {
 		buf := make([]byte, 4096)
 		for {
-			if _, err := p.ptmx.Read(buf); err != nil {
+			if _, err := p.con.Read(buf); err != nil {
 				close(done)
 				return
 			}

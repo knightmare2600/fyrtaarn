@@ -179,6 +179,8 @@ func parseRPC(b []byte) ([]map[string]string, int, error) {
 type MediaPorts struct {
 	Token  string // authenticates the IUSB media connections
 	CDPort int
+	FDPort int  // floppy; 0 if the launch file does not give one
+	HDPort int  // hard disk / USB key; 0 if not given
 	Secure bool // media ports want TLS (not supported by iusb yet)
 }
 
@@ -203,6 +205,8 @@ func (c *Client) MediaPorts() (MediaPorts, error) {
 	}
 	mp := MediaPorts{Token: args["-kvmtoken"], Secure: args["-vmsecure"] == "1"}
 	mp.CDPort, _ = strconv.Atoi(args["-cdport"])
+	mp.FDPort, _ = strconv.Atoi(args["-fdport"])
+	mp.HDPort, _ = strconv.Atoi(args["-hdport"])
 	if mp.Token == "" || mp.CDPort == 0 {
 		return mp, errors.New("JViewer launch file has no KVM token or CD port")
 	}

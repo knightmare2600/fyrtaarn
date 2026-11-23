@@ -24,4 +24,8 @@ type HostResult struct {
 	RedfishVersion      string
 	RedfishManufacturer string
 	RedfishModel        string
+	// WebUI names the BMC's web interface when it was recognised from its
+	// front page (see probeWebUI), e.g. "AMI MegaRAC SP"; used for BMCs
+	// without Redfish.
+	WebUI string
 }

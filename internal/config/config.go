@@ -30,6 +30,9 @@ type Config struct {
 	NVDAPIKey         string             `json:"nvd_api_key,omitempty"`
 	RecentConnections []RecentConnection `json:"recent_connections,omitempty"`
 	Favourites        []Favourite        `json:"favourites,omitempty"`
+	// DashboardSensors lists the sensors on each host's dashboard, by BMC
+	// address, in the order they were chosen.
+	DashboardSensors map[string][]string `json:"dashboard_sensors,omitempty"`
 }
 
 func path() (string, error) {

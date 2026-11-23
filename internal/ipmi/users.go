@@ -23,7 +23,54 @@ func GetUsers(host, user, pass string) ([]UserEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	return parseUserList(output), nil
+	users := parseUserList(output)
+
+	// "user list" has no enabled column, so parseUserList guesses from the
+	// name. "channel getaccess" reports each user's real Enable Status
+	// (Get User Access; ipmi_channel.c). Channel 14 means "the channel this
+	// request arrived on" in the IPMI spec, so no per-vendor LAN channel
+	// number is needed. If it fails, the guess stands.
+	if acc, err := runIPMICommand(host, user, pass, ipmiLongTimeout, "channel", "getaccess", "14"); err == nil {
+		applyEnableStatus(users, parseEnableStatus(acc))
+	}
+	return users, nil
+}
+
+// parseEnableStatus reads "channel getaccess" output into user ID ->
+// enabled, for users whose status is "enabled" or "disabled" ("unknown"
+// means the BMC does not track it).
+func parseEnableStatus(out string) map[int]bool {
+	status := map[int]bool{}
+	id := -1
+	for _, line := range strings.Split(out, "\n") {
+		k, v, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		switch k {
+		case "User ID":
+			if n, err := strconv.Atoi(v); err == nil {
+				id = n
+			}
+		case "Enable Status":
+			switch v {
+			case "enabled":
+				status[id] = true
+			case "disabled":
+				status[id] = false
+			}
+		}
+	}
+	return status
+}
+
+func applyEnableStatus(users []UserEntry, status map[int]bool) {
+	for i := range users {
+		if on, ok := status[users[i].ID]; ok {
+			users[i].Enabled = on
+		}
+	}
 }
 
 func EnableUser(host, adminUser, adminPass string, userID int) error {
@@ -144,8 +191,10 @@ func parseUserList(data string) []UserEntry {
 			CallinEnabled: strings.EqualFold(callinF, "true"),
 			LinkEnabled:   strings.EqualFold(linkF, "true"),
 			IPMIEnabled:   strings.EqualFold(ipmiF, "true"),
-			Enabled:       name != "" && name != "(Empty User)",
-			Privilege:     privilege,
+			// A guess: "user list" has no enabled column. GetUsers replaces
+			// it with the BMC's own Enable Status where it reports one.
+			Enabled:   name != "" && name != "(Empty User)",
+			Privilege: privilege,
 		})
 	}
 

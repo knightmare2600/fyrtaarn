@@ -237,3 +237,104 @@ func TestParseUserList(t *testing.T) {
 		t.Fatal("fixture drifted from ipmitool's format")
 	}
 }
+
+// channel getaccess output, built from ipmi_channel.c's printf formats
+// (ipmitool 1.8.18, lines 718-738); user 3 has a name but is disabled, the
+// case the name-based guess got wrong on the Quanta in Tested Hardware.
+const getAccessOutput = `Maximum User IDs     : 10
+Enabled User IDs     : 1
+
+User ID              : 1
+User Name            : 
+Fixed Name           : Yes
+Access Available     : call-in / callback
+Link Authentication  : disabled
+IPMI Messaging       : disabled
+Privilege Level      : NO ACCESS
+Enable Status        : disabled
+
+User ID              : 2
+User Name            : admin
+Fixed Name           : No
+Access Available     : call-in / callback
+Link Authentication  : enabled
+IPMI Messaging       : enabled
+Privilege Level      : ADMINISTRATOR
+Enable Status        : enabled
+
+User ID              : 3
+User Name            : olduser
+Fixed Name           : No
+Access Available     : call-in / callback
+Link Authentication  : disabled
+IPMI Messaging       : disabled
+Privilege Level      : USER
+Enable Status        : disabled
+
+User ID              : 4
+User Name            : ghost
+Fixed Name           : No
+Access Available     : call-in / callback
+Link Authentication  : disabled
+IPMI Messaging       : disabled
+Privilege Level      : USER
+Enable Status        : unknown
+`
+
+func TestEnableStatus(t *testing.T) {
+	users := []UserEntry{{ID: 2, Name: "admin", Enabled: true}, {ID: 3, Name: "olduser", Enabled: true}, {ID: 4, Name: "ghost", Enabled: true}}
+	applyEnableStatus(users, parseEnableStatus(getAccessOutput))
+	if !users[0].Enabled || users[1].Enabled || !users[2].Enabled {
+		t.Fatalf("got %+v (want admin on, olduser off, ghost unchanged)", users)
+	}
+}
+
+// TestFRUDeviceNotPresent checks an empty FRU device keeps its explanation
+// (ipmitool ipmi_fru.c prints " Device not present (%s)" under the header).
+func TestFRUDeviceNotPresent(t *testing.T) {
+	out := "FRU Device Description : Builtin FRU Device (ID 0)\n Product Name          : Test\n\n" +
+		"FRU Device Description : CPU 2 (ID 2)\n Device not present (Parameter out of range)\n"
+	es := parseFRU(out)
+	if len(es) != 4 || !es[2].IsHeader || es[3].Field != "Status" || es[3].Value != "Device not present (Parameter out of range)" {
+		t.Fatalf("got %+v", es)
+	}
+}
+
+// sol info output as ipmitool 1.8.18 (ipmi_sol.c) prints it, modelled on
+// the iDRAC9 in Tested Hardware including its "not supported" notice line;
+// the non-volatile rate is changed from the iDRAC's 115.2 so the two rates
+// can be told apart.
+const solInfoOutput = `Info: SOL parameter 'Payload Channel (7)' not supported - defaulting to 0x0e
+Set in progress                 : set-complete
+Enabled                         : true
+Force Encryption                : true
+Force Authentication            : false
+Privilege Level                 : ADMINISTRATOR
+Character Accumulate Level (ms) : 50
+Character Send Threshold        : 255
+Retry Count                     : 7
+Retry Interval (ms)             : 480
+Volatile Bit Rate (kbps)        : 115.2
+Non-Volatile Bit Rate (kbps)    : 57.6
+Payload Channel                 : 14 (0x0e)
+Payload Port                    : 623
+`
+
+func TestParseSOLInfo(t *testing.T) {
+	s := parseSOLInfo(solInfoOutput)
+	if !s.Enabled || !s.ForceEncryption || s.Privilege != "ADMINISTRATOR" || s.BitRate != "115.2" || s.NVBitRate != "57.6" {
+		t.Fatalf("got %+v", s)
+	}
+	if parseSOLInfo("Enabled : false\n").Enabled {
+		t.Fatal("disabled read as enabled")
+	}
+	for in, want := range map[string]string{
+		"User 2 on channel 14 is enabled": "enabled",
+		"User 3 on channel 1 is disabled": "disabled",
+		"Error: something":                "",
+	} {
+		if got := parsePayloadStatus(in); got != want {
+			t.Errorf("%q: got %q", in, got)
+		}
+	}
+}

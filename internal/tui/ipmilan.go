@@ -68,14 +68,17 @@ func NewIPMILanDialog(host string, st redfish.IPMIOverLAN, fromConnect bool) *Di
 	if st.Enabled {
 		action, label = "ipmilan-off", "Disable"
 	}
+	buttons := []DialogButton{{Label: label, Action: action}}
+	if fromConnect {
+		// Leave IPMI off and manage the BMC over Redfish (redfishonly.go).
+		buttons = append(buttons, DialogButton{Label: "Use Redfish only", Action: "redfish-view"})
+	}
+	buttons = append(buttons, DialogButton{Label: "Cancel", Action: "cancel"})
 	return &Dialog{
-		Title: "IPMI over LAN",
-		Body:  b.String(),
-		buttons: []DialogButton{
-			{Label: label, Action: action},
-			{Label: "Cancel", Action: "cancel"},
-		},
-		focus: 1, // changing BMC security settings is never the default
+		Title:   "IPMI over LAN",
+		Body:    b.String(),
+		buttons: buttons,
+		focus:   len(buttons) - 1, // changing BMC security settings is never the default
 	}
 }
 
