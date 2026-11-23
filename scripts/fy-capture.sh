@@ -160,6 +160,29 @@ rf noauth /redfish/v1/Systems/ >/dev/null
 # --- Redfish: authenticated walk ------------------------------------------
 rf auth /redfish/v1/SessionService/ >/dev/null
 
+# field <file> <key> : a top-level string field of a JSON document.
+field() {
+  python3 - "$1" "$2" <<'PY' 2>/dev/null
+import json, sys
+try:
+  v = json.load(open(sys.argv[1])).get(sys.argv[2])
+except Exception:
+  sys.exit(0)
+if isinstance(v, str):
+  print(v)
+PY
+}
+
+# iLO 4 is not asked for log entries: the first request for its IML entries
+# stalled an iLO 4 2.54's web server (no answer to anything for minutes, on
+# a production box). Its IPMI event log (sel-list) is captured above.
+ilo4=0
+for m in $(members "$(rf auth /redfish/v1/Managers/)" | head -2); do
+  case $(field "$(rf auth "$m")" FirmwareVersion) in
+    "iLO 4"*) ilo4=1 ;;
+  esac
+done
+
 # logs <file> : the log services linked from a System or Manager, each with
 # the first page of its entries (no paging: iDRAC's Lifecycle log alone runs
 # to thousands of entries).
@@ -167,6 +190,10 @@ logs() {
   local ls svc
   ls=$(link "$1" LogServices)
   [ -n "$ls" ] || return 0
+  if [ "$ilo4" = 1 ]; then
+    log "logs    skipped on iLO 4 (requesting entries stalled its web server)"
+    return 0
+  fi
   for svc in $(members "$(rf auth "$ls")"); do
     local e
     e=$(link "$(rf auth "$svc")" Entries)
