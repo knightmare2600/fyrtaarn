@@ -7,7 +7,8 @@
 # Writes ~/fyrtaarn-fixtures/<name>/ containing:
 #   ipmi/*.txt      exactly the ipmitool commands fyrtaarn runs
 #   redfish/*.json  unauthenticated probes, then an authenticated walk of
-#                   Systems, Managers (incl. VirtualMedia slots), Chassis
+#                   Systems, Managers (incl. NetworkProtocol and VirtualMedia
+#                   slots), Chassis
 #                   (thermal/power/sensors) and SessionService
 #   summary.txt     exit code / HTTP status and timing for every call
 #
@@ -121,6 +122,26 @@ PY
 
 log "== $name ($ip) $(date -u +%Y-%m-%dT%H:%M:%SZ)  $(ipmitool -V 2>&1)"
 
+# protocols <file> : one line listing each protocol in a Redfish
+# ManagerNetworkProtocol resource as name=on/off:port, e.g. "IPMI=off:623".
+# Shows at a glance whether IPMI over LAN is switched off on the BMC.
+protocols() {
+  python3 - "$1" <<'PY' 2>/dev/null
+import json, sys
+try:
+  d = json.load(open(sys.argv[1]))
+except Exception:
+  sys.exit(0)
+out = []
+for k, v in sorted(d.items()):
+  if isinstance(v, dict) and "ProtocolEnabled" in v:
+    state = {True: "on", False: "off"}.get(v["ProtocolEnabled"], "?")
+    port = v.get("Port")
+    out.append("%s=%s%s" % (k, state, ":%s" % port if port is not None else ""))
+print(" ".join(out))
+PY
+}
+
 # --- IPMI: the commands fyrtaarn runs, in its order -------------------------
 ipmi mc-info        mc info
 ipmi lan-print      lan print
@@ -146,6 +167,11 @@ done
 mgr_col=$(rf auth /redfish/v1/Managers/)
 for m in $(members "$mgr_col" | head -2); do
   mf=$(rf auth "$m")
+  np=$(link "$mf" NetworkProtocol)
+  if [ -n "$np" ]; then
+    npf=$(rf auth "$np")
+    log "protocols $m: $(protocols "$npf")"
+  fi
   vm=$(link "$mf" VirtualMedia)
   if [ -n "$vm" ]; then
     vmf=$(rf auth "$vm")
