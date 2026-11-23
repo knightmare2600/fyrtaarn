@@ -150,7 +150,8 @@ func TestShutdownAlreadyExited(t *testing.T) {
 func TestStaleSOLReadDiscarded(t *testing.T) {
 	shortSOLTimeouts(t)
 	p := startTestPane(t, "sleep", "300")
-	a := &App{solPane: p, solGeneration: 2, currentScreen: screenSOL}
+	// On the SOL screen the mouse is already released (syncMouse).
+	a := &App{solPane: p, solGeneration: 2, currentScreen: screenSOL, mouseReleased: true}
 
 	_, cmd := a.Update(solReadMsg{Data: []byte("stale"), Gen: 1})
 	if cmd != nil {
@@ -217,7 +218,9 @@ func TestSOLUnsupportedExplainsUpFront(t *testing.T) {
 
 	a := &App{currentScreen: screenMCInfo, username: "root"}
 	a.results = append(a.results, discoveryHost("10.0.0.30"))
-	_, cmd := a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+	// update, not Update: opening the dialog also releases the mouse
+	// (syncMouse), which is a command too but not a chassis check.
+	_, cmd := a.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
 	d := a.activeDialog
 	if d == nil || d.Title != "SOL Console Not Available" {
 		t.Fatalf("want unsupported dialog, got %+v", d)
@@ -232,6 +235,33 @@ func TestSOLUnsupportedExplainsUpFront(t *testing.T) {
 	} {
 		if !strings.Contains(d.Body, want) {
 			t.Errorf("dialog lacks %q: %q", want, d.Body)
+		}
+	}
+}
+
+// TestKeyToBytesText checks typed and pasted text reaches the BMC as the
+// characters themselves: '+' used to be dropped (key names containing '+'
+// were taken for combinations like ctrl+x) and pastes arrived as "[text]".
+func TestKeyToBytesText(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  tea.KeyMsg
+		want string
+	}{
+		{"plus", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'+'}}, "+"},
+		{"letter", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}}, "a"},
+		{"utf8", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("æøå")}, "æøå"},
+		{"paste", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("ls -l a+b"), Paste: true}, "ls -l a+b"},
+		{"paste lines", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("one\ntwo\r\nthree"), Paste: true}, "one\rtwo\rthree"},
+		{"alt", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}, Alt: true}, "\x1bx"},
+		{"space", tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}}, " "},
+		{"enter", tea.KeyMsg{Type: tea.KeyEnter}, "\r"},
+		{"insert sends nothing, not its name", tea.KeyMsg{Type: tea.KeyInsert}, ""},
+		{"ctrl+c", tea.KeyMsg{Type: tea.KeyCtrlC}, "\x03"},
+	}
+	for _, c := range cases {
+		if got := string(keyToBytes(c.msg)); got != c.want {
+			t.Errorf("%s: got %q want %q", c.name, got, c.want)
 		}
 	}
 }

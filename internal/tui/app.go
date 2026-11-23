@@ -179,6 +179,9 @@ type App struct {
 	ipmiLanHost        string
 	ipmiLanFromConnect bool
 
+	// mouseReleased is true while mouse reporting is off (see syncMouse).
+	mouseReleased bool
+
 	// statusSeen/statusSeenAt track when the status text last changed, so
 	// the status bar can show it before falling back to the key hints.
 	statusSeen   string
@@ -706,7 +709,49 @@ func eggTick() tea.Cmd {
 
 /* ---------------- UPDATE ---------------- */
 
+// Update handles msg, then captures or releases the mouse to suit what is
+// on screen now (see syncMouse).
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Input boxes in dialogs get their own follow-up messages here: Ctrl+V
+	// reads the clipboard in a command whose result arrives as a separate
+	// message, as do cursor blinks. Dialogs are only sent key presses, so
+	// without this the pasted text was dropped. Key presses still go
+	// through the normal routing below, only once.
+	var inputCmd tea.Cmd
+	if _, isKey := msg.(tea.KeyMsg); !isKey {
+		if a.activeDialog != nil {
+			inputCmd = a.activeDialog.UpdateInput(msg)
+		} else if a.activeFavDialog != nil {
+			inputCmd = a.activeFavDialog.UpdateInput(msg)
+		}
+	}
+	m, cmd := a.update(msg)
+	return m, tea.Batch(inputCmd, cmd, a.syncMouse())
+}
+
+// wantMouse reports whether fyrtaarn has a use for the mouse right now. Its
+// only use is clicking the menu bar, which dialogs and SOL do not offer.
+// Elsewhere the terminal keeps the mouse, so its own select-to-copy and
+// right-click paste (PuTTY) work in input boxes and in the SOL console.
+func (a *App) wantMouse() bool {
+	return a.currentScreen != screenSOL && a.activeDialog == nil && a.activeFavDialog == nil
+}
+
+// syncMouse switches mouse reporting on or off when wantMouse changes. The
+// program starts with it on (tea.WithMouseCellMotion in main).
+func (a *App) syncMouse() tea.Cmd {
+	want := a.wantMouse()
+	if want != a.mouseReleased {
+		return nil
+	}
+	a.mouseReleased = !want
+	if want {
+		return tea.EnableMouseCellMotion
+	}
+	return tea.DisableMouse
+}
+
+func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 

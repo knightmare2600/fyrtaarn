@@ -779,6 +779,20 @@ func listenSOL(p *solPane, gen int) tea.Cmd {
 // keyToBytes converts a bubbletea KeyMsg to the byte sequence the pty expects.
 // Returns nil for keys that should not be forwarded (e.g. the disconnect key).
 func keyToBytes(msg tea.KeyMsg) []byte {
+	// Typed and pasted text: send the characters themselves. msg.String()
+	// is no use here: it wraps pastes in "[...]" (bubbletea key.go, so key
+	// bindings never match pasted text) and names Alt combinations "alt+x".
+	if msg.Type == tea.KeyRunes {
+		b := []byte(string(msg.Runes))
+		if msg.Paste {
+			// A console's Enter is CR; pasted lines end in LF or CRLF.
+			b = []byte(strings.ReplaceAll(strings.ReplaceAll(string(b), "\r\n", "\r"), "\n", "\r"))
+		}
+		if msg.Alt {
+			b = append([]byte{'\x1b'}, b...) // xterm meta: ESC prefix
+		}
+		return b
+	}
 	switch msg.String() {
 	case "enter":
 		return []byte{'\r'}
@@ -870,21 +884,8 @@ func keyToBytes(msg tea.KeyMsg) []byte {
 		return []byte{'\x1b', '[', '2', '3', '~'}
 	case "f12":
 		return []byte{'\x1b', '[', '2', '4', '~'}
-	case "space":
+	case " ", "space": // KeySpace's name is " " (bubbletea keyNames)
 		return []byte{' '}
 	}
-	s := msg.String()
-	if s != "" && !containsPlus(s) {
-		return []byte(s)
-	}
 	return nil
-}
-
-func containsPlus(s string) bool {
-	for _, r := range s {
-		if r == '+' {
-			return true
-		}
-	}
-	return false
 }

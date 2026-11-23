@@ -388,11 +388,22 @@ func (d *Dialog) Update(msg tea.KeyMsg) (action string, consumed bool, cmd tea.C
 	}
 
 	if d.focus < len(d.inputs) {
-		d.inputs[d.focus], cmd = d.inputs[d.focus].Update(msg)
-		return "", true, cmd
+		return "", true, d.UpdateInput(msg)
 	}
 
 	return "", true, nil
+}
+
+// UpdateInput passes msg to the focused input box, if any: key presses, and
+// the messages an input's own commands produce later (Ctrl+V's clipboard
+// text, cursor blinks). Inputs ignore messages that are not theirs.
+func (d *Dialog) UpdateInput(msg tea.Msg) tea.Cmd {
+	if d.focus >= len(d.inputs) {
+		return nil
+	}
+	var cmd tea.Cmd
+	d.inputs[d.focus], cmd = d.inputs[d.focus].Update(msg)
+	return cmd
 }
 
 func (d *Dialog) syncFocus() tea.Cmd {

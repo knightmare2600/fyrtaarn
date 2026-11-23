@@ -226,18 +226,39 @@ func (f *FavouritesDialog) updateForm(msg tea.KeyMsg) (changed, closed bool, cmd
 		}
 	}
 
-	var c tea.Cmd
+	return false, false, f.UpdateInput(msg)
+}
+
+// focusedInput is the form field with focus, or nil (list view, or focus on
+// a button).
+func (f *FavouritesDialog) focusedInput() *textinput.Model {
+	if !f.editing {
+		return nil
+	}
 	switch f.formFocus {
 	case favFocusName:
-		f.nameInput, c = f.nameInput.Update(msg)
+		return &f.nameInput
 	case favFocusIP:
-		f.ipInput, c = f.ipInput.Update(msg)
+		return &f.ipInput
 	case favFocusUser:
-		f.userInput, c = f.userInput.Update(msg)
+		return &f.userInput
 	case favFocusPass:
-		f.passInput, c = f.passInput.Update(msg)
+		return &f.passInput
 	}
-	return false, false, c
+	return nil
+}
+
+// UpdateInput passes msg to the focused field: key presses, and the
+// messages a field's own commands produce (Ctrl+V's clipboard text, cursor
+// blinks), which arrive later as separate messages.
+func (f *FavouritesDialog) UpdateInput(msg tea.Msg) tea.Cmd {
+	in := f.focusedInput()
+	if in == nil {
+		return nil
+	}
+	var c tea.Cmd
+	*in, c = in.Update(msg)
+	return c
 }
 
 func (f *FavouritesDialog) syncFormFocus() tea.Cmd {

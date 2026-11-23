@@ -203,7 +203,9 @@ The Quanta's web interface speaks TLS 1.0 at most, with NULL-MD5, RC4-MD5 and tw
 - LMedia (Upload to BMC): **fails** — the BMC accepts the upload but answers status -1 when asked to register it, for a formatted FAT12 floppy and for a valid ISO alike, and identically when the browser's own requests are replayed with curl.
 - Firmware bug: requesting `/Java/jviewer.jnlp` without the `EXTRNIP` query parameter the BMC's own page adds makes the BMC write `(null)` as its host and crashes its web server, which stays down until `ipmitool mc reset cold`. Fyrtaarn always sends `EXTRNIP`, and the web UI proxy rewrites it to the BMC's address.
 
-Not yet tested on hardware: Supermicro's own BMC firmware, Oracle/Sun ILOM, Lenovo XCC, Cisco CIMC, other iLO generations. Reports welcome.
+HPE iLO 5 (ProLiant ML350 Gen10, FW 1.40), release 0.7.0, 2026-11-23: IPMI over LAN was switched off, so Redfish answered and IPMI never did. BMC > IPMI over LAN... switched it on over Redfish; the iLO's own web UI then showed it on, where it had been off, and fyrtaarn connected over IPMI. SOL not yet tried on this BMC.
+
+Not yet tested on hardware: Supermicro's own BMC firmware, Oracle/Sun ILOM, Lenovo XCC, Cisco CIMC, iLO 3 and 6. Reports welcome.
 
 To report a BMC, run `scripts/fy-capture.sh` against it and attach the output:
 
@@ -495,6 +497,11 @@ For detailed technical writeups and excellent explanations of:
 ---
 
 ## Changelog
+
+### 0.7.1
+
+- **Copy and paste in input boxes and SOL** — fyrtaarn captured the mouse everywhere for menu-bar clicks, so the terminal never got the mouse: no drag-to-select copying, and PuTTY's right-click paste arrived as a click. Mouse capture is now off while a dialog (Connect, passwords, Favourites, Virtual Media, ...) or the SOL console is open, and back on for the menu bar elsewhere. Pasting into input boxes, including passwords, works with every terminal paste (Ctrl+Shift+V, Cmd+V, right-click). With the mouse captured, Shift+drag (PuTTY, Windows Terminal) or Option+drag (iTerm2) still selects. Ctrl+V inside fyrtaarn's input boxes never pasted either: it reads the clipboard in a separate step whose result was dropped before reaching the box; it now arrives. Ctrl+V reads the clipboard of the machine fyrtaarn runs on, so over SSH use the terminal's own paste instead
+- **SOL console: `+` and pasted text** — `+` could not be typed (key names containing `+` were taken for combinations like ctrl+x), pasted text arrived wrapped in `[...]`, Insert typed the word "insert", and Alt+key was dropped. Typed and pasted characters are now sent as themselves, pasted line endings as CR, Alt+key as ESC+key
 
 ### 0.7.0
 
