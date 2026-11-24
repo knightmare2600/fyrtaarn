@@ -561,6 +561,9 @@ func (a *App) infoScreen() screen {
 func (a *App) closeFileBrowser(chosen string) (tea.Model, tea.Cmd) {
 	a.currentScreen = a.fbReturn
 	d := NewVirtualMediaDialog(a.fbRedfishVM)
+	if len(a.results) > 0 && a.selectedHost >= 0 && a.selectedHost < len(a.results) {
+		d = a.vmDialogFor(a.results[a.selectedHost])
+	}
 	if chosen != "" {
 		d.inputs[0].SetValue(chosen)
 		d.inputs[0].CursorEnd()
@@ -1785,8 +1788,9 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 		}
 		host := a.results[a.selectedHost]
 		a.stopAMIMedia()
-		if !host.HasRedfish {
-			if strings.HasPrefix(input, "http://") || strings.HasPrefix(input, "https://") {
+		vendorVM, _ := a.nonRedfishVM(host)
+		if !host.HasRedfish && vendorVM == nil {
+			if isImageURL(input) {
 				a.status = "This BMC has no Redfish: give a local file path, not a URL"
 				return a, nil
 			}
@@ -1804,7 +1808,7 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 		}
 
 		isoURL := input
-		if !strings.HasPrefix(input, "http://") && !strings.HasPrefix(input, "https://") {
+		if !isImageURL(input) {
 			// Not a URL — treat as a local ISO path and serve it ourselves.
 			// Redfish InsertMedia only ever fetches from a URL; the BMC has
 			// no endpoint that accepts a direct upload from this tool.
@@ -1828,6 +1832,9 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 		}
 
 		a.ipmiLoading = true
+		if vendorVM != nil {
+			return a, tea.Batch(a.spinner.Tick, runProviderAction(vendorVM, isoURL, "mount"))
+		}
 		return a, tea.Batch(a.spinner.Tick, runVMAction(host.IP, isoURL, a.username, a.password, host.RedfishManufacturer, "mount"))
 
 	case "vm-eject":
@@ -1836,7 +1843,8 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		host := a.results[a.selectedHost]
-		if !host.HasRedfish {
+		vendorVM, _ := a.nonRedfishVM(host)
+		if !host.HasRedfish && vendorVM == nil {
 			if a.amiMediaHost == host.IP && a.amiMediaStop != nil {
 				a.stopAMIMedia() // the ended message reports the detach
 				a.status = "Detaching virtual drive from " + host.IP
@@ -1851,6 +1859,9 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 		}
 		a.ipmiLoading = true
 		a.status = "Ejecting virtual media from " + host.IP
+		if vendorVM != nil {
+			return a, tea.Batch(a.spinner.Tick, runProviderAction(vendorVM, "", "eject"))
+		}
 		return a, tea.Batch(a.spinner.Tick, runVMAction(host.IP, "", a.username, a.password, host.RedfishManufacturer, "eject"))
 
 	case "user-enable":
@@ -2278,7 +2289,7 @@ func (a *App) updateMCInfo(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(a.results) == 0 {
 			return a, nil
 		}
-		a.activeDialog = NewVirtualMediaDialog(a.results[a.selectedHost].HasRedfish)
+		a.activeDialog = a.vmDialogFor(a.results[a.selectedHost])
 		return a, textinput.Blink
 
 	case "w":

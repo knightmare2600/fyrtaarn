@@ -166,14 +166,20 @@ The name reflects the project's purpose: visibility, remote control, and infrast
   it picks the CD slot's Insert/Eject actions on each; XCC is untested; vendors
   without Redfish VirtualMedia need their own backend, and each waits for a
   BMC to test it on:
-  - `ilo.go` — iLO 3 via RIBCL (no Redfish); iLO 5/6 session-token auth
+  - `ilo.go` — iLO 3 via RIBCL (no Redfish): built in 0.9.2 from python-hpilo's
+    implementation, untested on hardware; iLO 5/6 session-token auth still open
     (iLO 4 needs no backend — the generic walker handles it)
-  - `drac.go` — iDRAC 7/8 via WSMAN; iDRAC 9 Redfish + Dell OEM RemoteImage extension
+  - `drac.go` — iDRAC 7/8: built in 0.9.2 over Dell's OEM network-ISO Redfish actions
+    (NFS/CIFS shares), untested on hardware; WS-Man for firmware without them is not
+    built; iDRAC 9 stays on the generic walker
   - `supermicro.go` — AMI MegaRAC Redfish where available; detect IKVM-only firmware
     (implemented in 0.6.3 — delegates to the generic walker after a VirtualMedia probe)
-  - `lom.go` — Oracle ILOM 3.x (proprietary REST) and 4.x (Redfish where supported)
-  - `xcc.go` — Lenovo XCC Redfish with session management
-  - `cimc.go` — Cisco CIMC XML API 2.0 (no Redfish VirtualMedia surface)
+  - `lom.go` — Oracle ILOM: not built; its virtual media is driven over SSH, and an SSH
+    client (`golang.org/x/crypto/ssh`) was not added for 0.9.2
+  - `xcc.go` — Lenovo XCC: built in 0.9.2 (EXT slots by PATCH, from Lenovo's REST
+    reference), untested on hardware
+  - `cimc.go` — Cisco CIMC: built in 0.9.2 over the IMC XML API (from Cisco's imcsdk),
+    untested on hardware
 - Generic Redfish fallback: replace path-sniffing slot discovery with `MediaTypes`
   array inspection so numeric and non-descriptive slot paths are found correctly
   (done — the generic walker accepts a slot by path or by `MediaTypes`)
@@ -200,16 +206,64 @@ every other BMC it is unchecked, and `FYRTAARN_IPMI=ipmitool` gives the checked 
 | Vendor / BMC | IPMI (info, sensors, SOL, power, users) | Virtual media | Other |
 |---|---|---|---|
 | Dell iDRAC9 | Hardware (FW 4.20) | Generic Redfish walker, CD and USB slots: capture | Redfish-only mode sensors: capture |
-| Dell iDRAC 7/8 | Untested | Not built (needs WS-Man); no hardware to test on | |
+| Dell iDRAC 7/8 | Untested | Dell OEM network ISO (NFS/CIFS shares only), from Dell's own scripts: untested on hardware; firmware without the OEM service would need WS-Man, not built | |
 | HPE iLO 4 | Hardware (FW 2.54); `-C 3` after its cipher-list failure | Redfish `Oem.Hp` actions: hardware for CD (earlier), capture for USB | |
 | HPE iLO 5 | Connect after switching IPMI over LAN on: hardware (FW 1.40) | Standard Redfish actions: capture | IPMI over LAN switch: hardware |
-| HPE iLO 3 / 6 | Untested | iLO 3 needs RIBCL, not built; iLO 6 untested | |
+| HPE iLO 3 / 6 | Untested | iLO 3: RIBCL over HTTPS, from python-hpilo: untested on hardware; iLO 6 untested | |
 | Quanta, AMI MegaRAC SP (no Redfish) | Hardware (FW 7.54); `-C 3` after its suite refusal | AMI IUSB redirection, CD / floppy / USB disk, plain or TLS (secure mode): sessions accepted on hardware, no sector reads yet (server off); LMedia fails on this firmware | Web UI proxy over RC4-MD5: hardware |
 | Supermicro (own firmware) | Untested | Redfish VirtualMedia probe, then the generic walker; untested | |
-| Oracle ILOM, Lenovo XCC, Cisco CIMC | Untested | Generic Redfish walker may work; no dedicated backend; untested | |
+| Lenovo XCC | Untested | EXT slots by PATCH (HTTP; NFS/CIFS where the firmware takes them), from Lenovo's REST reference: untested on hardware | |
+| Cisco CIMC | Untested | IMC XML API vmedia mapping (HTTP, NFS, CIFS), from Cisco's imcsdk: untested on hardware | |
+| Oracle ILOM | Untested | Not built: driven over SSH, no SSH client in fyrtaarn | |
 
-The files `internal/redfish/{ilo,drac,lom,xcc,cimc}.go` are placeholders for vendor backends that
-need hardware to build and test against.
+#### Virtual media backends built from documentation (0.9.2)
+
+None of these four has mounted an image on its own kind of BMC; each is built from the vendor's
+own documentation or reference code. Two have had their protocol checked read-only on newer BMCs
+that speak it too (`fy-capture.sh`, 24 November 2026): RIBCL on an iLO 4 (2.54) and an iLO 5 (1.40),
+and Dell's OS deployment service on an iDRAC9 (4.20). Their tests use those replies' exact shapes;
+the other two are tested against their documented formats only. Inserting and ejecting are
+unchecked on hardware for all four.
+
+- **HP iLO 3** has no Redfish. fyrtaarn sends RIBCL 2.0 XML to `https://<bmc>/ribcl`, as
+  [python-hpilo](https://seveas.github.io/python-hpilo/) does: `INSERT_VIRTUAL_MEDIA` with the
+  image URL, then `SET_VM_STATUS` with `CONNECT` (inserting alone does not attach the image), and
+  `EJECT_VIRTUAL_MEDIA` to eject. A `.iso` goes to the CD-ROM, a disk or floppy image to the
+  floppy device. After connecting, fyrtaarn reads `GET_VM_STATUS` back and says so if the iLO took
+  the image but does not report it inserted; Eject reads it too and ejects only the devices that
+  report an image. Checked on the iLO 4 and iLO 5: `/ribcl` answers HTTP 200, and each reply is five
+  XML documents, each with a `RESPONSE` (`STATUS="0x0000"`), the last also holding the data
+  (`GET_VM_STATUS` with `VM_APPLET`, `BOOT_OPTION`, `WRITE_PROTECT`, `IMAGE_INSERTED`, `IMAGE_URL`),
+  which fyrtaarn reads correctly. A local file is served to the iLO over HTTP from this machine. The password is
+  sent unescaped, as python-hpilo sends it, so one containing a double quote is refused. An iLO
+  that answers `/ribcl` with 404 is an iLO 2 or older, whose raw RIBCL is not supported.
+- **Dell iDRAC 7 and 8** mount network shares, not HTTP: give `nfs://server/export/dir/image.iso`
+  or `cifs://user:password@server/share/image.iso`. fyrtaarn calls Dell's OEM
+  `ConnectNetworkISOImage` action, follows its job and checks `GetAttachStatus`, as Dell's own
+  `Invoke-ConnectNetworkIsoImageREDFISH` module does; Eject calls `DisconnectNetworkISOImage`.
+  Dell's scripts use two different URI prefixes; fyrtaarn uses whichever answers, and posts to the
+  action targets the service itself lists, after checking the share type against the service's
+  own list of allowed types. Checked on the iDRAC9: `/redfish/v1/Dell/Systems/...` answers and the
+  `.../Oem/Dell/...` form is a 404; the service lists `ShareType` `CIFS` and `NFS` only;
+  `GetAttachStatus` answers `{"ISOAttachStatus": "NotAttached", ...}`. A local file
+  cannot be used (fyrtaarn serves it over HTTP), and an HTTP image on an iDRAC 7/8 says so.
+  iDRAC9 is unchanged: HTTP images through standard Redfish.
+- **Lenovo XCC** takes an image by URL only in its `EXT1`-`EXT4` slots (Lenovo: RDOC and Remote
+  slots cannot be inserted that way), by a PATCH of `Image`, `Inserted` and `WriteProtected` rather
+  than the standard InsertMedia action, which Lenovo does not document; eject sets `Image` to null
+  and `Inserted` to false. XCC2's slots are under `Systems/1`, XCC's under `Managers/1`. Lenovo's
+  XCC pages disagree on which protocols XCC (not XCC2) accepts; the XCC answers for itself.
+- **Cisco CIMC** uses the IMC XML API at `https://<bmc>/nuova`, as Cisco's imcsdk does: a
+  `commVMediaMap` (`map="www"` for HTTP, `nfs`, `cifs`), waited on until its `mappingStatus` is
+  `OK`, then the session is closed. A local file is served over HTTP. Eject removes every mapping.
+  The exact XML element and attribute names were not in the imcsdk files read and follow the
+  IMC XML API's conventions (`aaaLogin`, `outCookie`, `configConfMo`), so they are the likeliest
+  point of failure.
+
+A BMC with Redfish picks its backend by its Redfish manufacturer (Lenovo, Dell, Cisco); one
+without Redfish by its IPMI manufacturer ID, read at login (HP: iLO 3; Cisco: CIMC); every other
+BMC without Redfish keeps AMI media redirection. The Virtual Media dialog names the mechanism in
+use for that BMC.
 
 ---
 
@@ -914,6 +968,12 @@ For detailed technical writeups and excellent explanations of:
 ---
 
 ## Changelog
+
+### 0.9.2
+
+- **Virtual media backends** for HP iLO 3 (RIBCL), Dell iDRAC 7/8 (OEM network ISO, NFS/CIFS), Lenovo XCC (EXT slots) and Cisco CIMC (IMC XML API), each built from the vendor's documentation or reference code; the RIBCL and Dell protocols checked read-only on an iLO 4, an iLO 5 and an iDRAC9, mounting **not yet checked on hardware** for any of the four; see "Virtual media backends built from documentation" under Planned Features. Oracle ILOM is not built (needs SSH)
+- **Capture script** — on an iLO, read-mode RIBCL (firmware version, virtual media status); on any BMC, Dell's OS deployment service and its attach status
+- **Virtual Media** — `nfs://`, `cifs://` and `smb://` images are passed to the BMC as URLs instead of being taken for local paths; the dialog names the mechanism used for the BMC
 
 ### 0.9.1
 

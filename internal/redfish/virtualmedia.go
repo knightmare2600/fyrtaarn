@@ -26,33 +26,46 @@ type VirtualMediaProvider interface {
 // ErrNotImplemented is returned by vendor stubs pending a full backend.
 var ErrNotImplemented = errors.New("virtual media: vendor backend not yet implemented")
 
-// NewProvider returns the vendor-specific VirtualMediaProvider for the given
-// manufacturer and product strings (as returned by Redfish or ipmitool mc info).
-// Falls back to the generic Redfish walker when no specific vendor match exists.
+// NewProvider returns the backend for a BMC with Redfish, by its Redfish
+// manufacturer:
 //
-// iLO 4 (HP/HPE) is handled correctly by the generic provider: it walks
-// Managers → VirtualMedia, identifies the CD/DVD slot via MediaTypes, and
-// finds the HP OEM action URLs under Oem.Hp.Actions. No separate iloProvider
-// backend is needed for iLO 4.
+//   - Lenovo: xccProvider (EXT slots by PATCH; xcc.go);
+//   - Dell: idracProvider (nfs:// and cifs:// images through Dell's OEM
+//     network ISO service for iDRAC 7/8, http(s) through the generic walker
+//     for iDRAC9; drac.go);
+//   - Cisco: cimcProvider (IMC XML API; cimc.go);
+//   - Supermicro: supermicroProvider, which probes for AMI MegaRAC's
+//     standard VirtualMedia before using the generic walker;
+//   - anyone else, HP iLO 4 and 5 included: the generic Redfish walker.
 //
-// Supermicro dispatches to supermicroProvider, which probes for AMI
-// MegaRAC's standard-schema Redfish VirtualMedia (also generic-provider
-// compatible) before attempting it, so IKVM-only firmware generations get a
-// clear unsupported error instead of a raw 404.
-//
-// TODO: dispatch to vendor backends for cases the generic provider cannot handle:
-//
-//	"hp" / "hpe"  (iLO 3)  → ilo.go  (RIBCL XML path, no Redfish)
-//	"hp" / "hpe"  (iLO 5+) → ilo.go  (session-token auth, chunked transfer on iLO 6)
-//	"dell"                  → drac.go (iDRAC 7/8 WSMAN; iDRAC 9 Redfish + Dell OEM)
-//	"oracle" / "sun"        → lom.go
-//	"lenovo"                → xcc.go
-//	"cisco"                 → cimc.go
+// Oracle ILOM (lom.go) is not built: its virtual media is driven over SSH.
 func NewProvider(host, user, pass, manufacturer, _ string) VirtualMediaProvider {
-	if strings.Contains(strings.ToLower(manufacturer), "supermicro") {
+	m := strings.ToLower(manufacturer)
+	switch {
+	case strings.Contains(m, "supermicro"):
 		return &supermicroProvider{host: host, user: user, pass: pass}
+	case strings.Contains(m, "lenovo"):
+		return &xccProvider{host: host, user: user, pass: pass}
+	case strings.Contains(m, "dell"):
+		return &idracProvider{host: host, user: user, pass: pass}
+	case strings.Contains(m, "cisco"):
+		return &cimcProvider{host: host, user: user, pass: pass}
 	}
 	return &genericProvider{host: host, user: user, pass: pass}
+}
+
+// NonRedfishBackend is the backend for a BMC without Redfish, chosen by its
+// IPMI manufacturer ID: HP (11) is an iLO 3 (every later iLO has Redfish),
+// Cisco (9) a CIMC. Anyone else gets nil, and fyrtaarn's AMI media
+// redirection is used.
+func NonRedfishBackend(host, user, pass string, ipmiManufacturer int) VirtualMediaProvider {
+	switch ipmiManufacturer {
+	case 11:
+		return &ilo3Provider{host: host, user: user, pass: pass}
+	case 9:
+		return &cimcProvider{host: host, user: user, pass: pass}
+	}
+	return nil
 }
 
 func httpClient() *http.Client {
