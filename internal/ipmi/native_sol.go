@@ -55,7 +55,7 @@ func StartNativeSOL(host, user, pass string) (*NativeSOL, error) {
 	if !useNative(host) {
 		return nil, errNativeOff
 	}
-	c, err := client.NewClient(host, 623, user, pass)
+	c, err := client.NewClient(host, nativePort, user, pass)
 	if err == nil {
 		c.WithMaxPrivilegeLevel(types.PrivilegeLevelAdministrator).WithTimeout(4 * time.Second).WithRetry(1)
 		if wantSuite3(host) {

@@ -44,8 +44,23 @@ func CheckFirmwareCompliance(host, user, pass string) (*ComplianceResult, error)
 	if err != nil {
 		return nil, err
 	}
+	r := complianceOf(*info)
+	return &r, nil
+}
 
-	result := &ComplianceResult{Info: *info, Compliant: true}
+// ComplianceFromMC applies the compliance rules to BMC info already read,
+// so a caller that has it (the fleet audit) needs no second request.
+func ComplianceFromMC(mc *MCInfo) ComplianceResult {
+	return complianceOf(FirmwareInfo{
+		FirmwareRevision: mc.FirmwareRevision,
+		IPMIVersion:      mc.IPMIVersion,
+		ManufacturerName: mc.ManufacturerName,
+		ProductName:      mc.ProductName,
+	})
+}
+
+func complianceOf(info FirmwareInfo) ComplianceResult {
+	result := ComplianceResult{Info: info, Compliant: true}
 
 	if info.IPMIVersion == "1.5" || strings.HasPrefix(info.IPMIVersion, "1.") {
 		result.Issues = append(result.Issues,
@@ -63,5 +78,5 @@ func CheckFirmwareCompliance(host, user, pass string) (*ComplianceResult, error)
 		result.Compliant = false
 	}
 
-	return result, nil
+	return result
 }

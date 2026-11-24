@@ -16,11 +16,7 @@ func observeMCInfo(host string, info *ipmi.MCInfo) {
 	if info == nil {
 		return
 	}
-	quirks.Observe(host, quirks.Identity{
-		ManufacturerID: info.ManufacturerID,
-		ProductID:      info.ProductID,
-		IPMIFirmware:   info.FirmwareRevision,
-	})
+	quirks.Observe(host, info.Identity())
 }
 
 func observeRedfish(host string, e *redfish.FullEnumeration) {

@@ -41,6 +41,7 @@ const (
 	screenSOL
 	screenDashboard
 	screenFileBrowser
+	screenFleet
 )
 
 const maxRecentConnections = 5
@@ -217,6 +218,11 @@ type App struct {
 	fb          *fileBrowser
 	fbReturn    screen
 	fbRedfishVM bool
+
+	// The fleet audit (fleet.go) and the screen to return to.
+	fleet               *fleetState
+	fleetReturn         screen
+	lastFleetExportPath string
 
 	// mouseReleased is true while mouse reporting is off (see syncMouse).
 	mouseReleased bool
@@ -1050,6 +1056,13 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.currentScreen = screenUsers
 		a.status = fmt.Sprintf("%d users", len(a.users))
 
+	case fleetProgressMsg:
+		return a, a.handleFleetProgress(msg)
+
+	case fleetDoneMsg:
+		a.handleFleetDone(msg)
+		return a, nil
+
 	case userActionMsg:
 		a.ipmiLoading = false
 		switch {
@@ -1477,6 +1490,8 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a.updateSOL(msg)
 		case screenDashboard:
 			return a.updateDashboard(msg)
+		case screenFleet:
+			return a.updateFleet(msg.String())
 		case screenFileBrowser:
 			chosen, done := a.fb.key(msg.String(), a.contentH)
 			if done {
@@ -1509,6 +1524,8 @@ func (a *App) handleMenuAction(action string) (tea.Model, tea.Cmd) {
 		return a.openSOLSettings()
 	case action == "bmc-reset":
 		return a.openBMCReset()
+	case action == "fleet-audit":
+		return a.openFleetAudit()
 	case action == "connect-bmc-dialog":
 		a.activeDialog = NewConnectBMCDialog("", a.username)
 		return a, textinput.Blink
@@ -1586,6 +1603,13 @@ func (a *App) handleDialogAction(action string) (tea.Model, tea.Cmd) {
 
 	case "bmc-reset-confirm":
 		return a.confirmBMCReset()
+
+	case "fleet-start":
+		return a.startFleetAudit()
+	case "fleet-export-csv":
+		return a.exportFleet(false)
+	case "fleet-export-json":
+		return a.exportFleet(true)
 
 	case "vm-browse":
 		typed := a.activeDialog.InputValue(0)
@@ -2668,6 +2692,8 @@ func (a *App) View() string {
 				content = a.renderDashboard()
 			case screenFileBrowser:
 				content = a.fb.render(a.width, a.contentH)
+			case screenFleet:
+				content = a.renderFleet()
 			case screenAbout:
 				content = a.aboutView()
 			default:
@@ -2985,6 +3011,12 @@ func (a *App) screenStatusHint() string {
 
 	case screenDashboard:
 		return "[+/-] Refresh interval  [R] Refresh now  [ESC] Back to sensors"
+
+	case screenFleet:
+		if a.fleet != nil && a.fleet.running {
+			return "[↑↓] Select  [Enter] Findings  [ESC] Stop after the BMCs already started"
+		}
+		return "[↑↓] Select  [Enter] Findings  [E] Export  [ESC] Back"
 
 	case screenFileBrowser:
 		return "[↑↓/Click] Select  [Enter/Click again] Open  [←/Bksp] Up  [~] Home  [.] Hidden  [A] All files  [ESC] Cancel"

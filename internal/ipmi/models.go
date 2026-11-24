@@ -1,5 +1,7 @@
 package ipmi
 
+import "github.com/knightmare2600/fyrtaarn/internal/quirks"
+
 type MCInfo struct {
 	DeviceID         string
 	FirmwareRevision string
@@ -49,4 +51,13 @@ type FRUEntry struct {
 	Field    string
 	Value    string
 	IsHeader bool // true for "FRU Device Description" section lines
+}
+
+// Identity is what the known-issues registry matches on, from BMC info.
+func (m *MCInfo) Identity() quirks.Identity {
+	return quirks.Identity{
+		ManufacturerID: m.ManufacturerID,
+		ProductID:      m.ProductID,
+		IPMIFirmware:   m.FirmwareRevision,
+	}
 }

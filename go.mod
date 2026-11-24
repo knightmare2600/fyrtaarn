@@ -41,3 +41,5 @@ require (
 	golang.org/x/term v0.34.0 // indirect
 	golang.org/x/text v0.28.0 // indirect
 )
+
+replace github.com/bougou/go-ipmi => github.com/knightmare2600/go-ipmi v0.9.3-0.20261124105454-da0424b9bf3c

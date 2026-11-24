@@ -87,6 +87,13 @@ func NewMenuBar() MenuBar {
 				},
 			},
 			{
+				Label: "Fleet",
+				Accel: 'L',
+				Items: []SubItem{
+					{Label: "Audit all hosts...", Accel: 'A', Action: "fleet-audit"},
+				},
+			},
+			{
 				Label: "Help",
 				Accel: 'H',
 				Items: []SubItem{

@@ -100,6 +100,12 @@ The name reflects the project's purpose: visibility, remote control, and infrast
 - **Reset BMC (cold)** — BMC > Reset BMC (cold)... restarts the management controller only, over IPMI (`mc reset cold`) or, in Redfish-only mode, the standard Redfish `Manager.Reset` (never vendor actions such as HPE's ResetToFactoryDefaults beside it). The dialog states that the server keeps running, settings are kept, the BMC is unreachable for one to three minutes and open sessions to it are cut, and the BMC's address must be typed to confirm; Enter in the address box moves to Cancel, not Reset. fyrtaarn closes its own virtual drive and web UI proxy to that BMC first. Recovers a BMC whose web server has stalled, as the iLO 4 under Known Issues did
 - **SOL settings** — BMC > SOL settings... shows whether the BMC offers SOL, its bit rate and required privilege, and whether the logged-in user may use SOL, and offers to switch SOL on or off and to allow the user (Cancel focused). Uses channel 14 ("this channel"), so no per-vendor LAN channel number. The server must still redirect its console to the BMC's serial port in its own BIOS/UEFI setup, which differs by vendor; the dialog says so rather than guessing. Reading checked on the Quanta; the changes are untested on hardware
 - **Redfish-only mode** — for a BMC with IPMI over LAN off, or none: BMC > Redfish view... (or Use Redfish only in the IPMI over LAN dialog, so IPMI can stay off) shows the system and manager details over Redfish, and from there `[S]` reads sensors from the Chassis Thermal and Power resources (temperatures, fans, voltages, power draw; absent parts skipped), `[P]` offers power actions from the BMC's own list of allowed reset types (never NMI; Cancel focused), `[L]` the event log (every Systems and Managers log service, first page each, newest first), `[U]` user accounts (shown read-only: their IDs are not IPMI user IDs), `[F]` the firmware inventory, `[V]` virtual media and `[W]` the web UI. Checked against captured Redfish responses of an iDRAC9 4.20, an iLO 4 2.54 (whose fans use `FanName`/`CurrentReading`/`Units` instead of the standard names) and an iLO 5 1.40; the power actions are untested on hardware
+- **Fleet audit** — Fleet > Audit all hosts... checks every BMC in the host list, four at a time, and changes nothing. Each BMC uses its saved login if it has one, otherwise a login typed once for the run; BMCs with neither are left out and counted. For each BMC it reports manufacturer, product, firmware, IPMI version, power state, which IPMI backend reached it, its enabled users and administrators, and these findings:
+  - *critical:* cipher suite 0 (no authentication) enabled at USER level or above, where any password is accepted (CVE-2013-4782); the anonymous user (user 1, no name) enabled with a privilege above CALLBACK; the run's login being a vendor factory default (Dell `root/calvin`, Supermicro `ADMIN/ADMIN`, IBM/Lenovo `USERID/PASSW0RD`, Oracle `root/changeme`, AMI `admin/admin`, as documented by Rapid7's 2013 IPMI guide and Dell, and seen on the Quanta; Cisco CIMC is left out, as no default could be confirmed);
+  - *warning:* IPMI 1.5 only, or a firmware revision of 0.00;
+  - *note:* cipher suite 0 enabled but capped below USER, or a check that could not be made.
+
+  Cipher suite 0 is judged by the privilege cap the BMC configures for it (LAN parameters 23 and 24), not by whether it is listed: the Quanta lists suite 0 and accepts a suite 0 session, but only at CALLBACK, below the USER level any real command needs, and `ipmitool -C 0` at USER is refused there. A BMC that does not answer those parameters gets a note, never a clean bill. The table shows each BMC's finding counts; Enter lists its findings; E exports CSV or JSON, written readable by you only (they name weak BMCs; they hold no passwords); Esc while running stops starting new BMCs. Checked on the Quanta: one critical (its `admin/admin` login) and one note (suite 0 capped at CALLBACK), in under a second
 - **File browser for images** — Browse... in the Virtual Media dialog opens a full-screen browser to pick a local image instead of typing its path. It shows folders and images (`.iso`, `.img`, `.ima`, `.vfd`; `[A]` for all files, `[.]` for hidden ones), starts from the folder of a path already typed or else the home folder, and fills the chosen path into the dialog with Mount focused. Keyboard: arrows or `j`/`k`, PgUp/PgDn, Home/End, Enter to open or choose, Backspace or Left for the parent, `~` for home, Esc to go back. Mouse: click selects, clicking the selected entry opens or chooses it (terminals report no double-click), the wheel scrolls. Paths use the platform's own separators on Linux, macOS and Windows; on Windows, going up from a drive's root lists the drives. Folder links are followed; unreadable folders show their error without leaving the current one
 - **Direct connect** — File > Connect to BMC opens a dialog (IP, username, password) and connects without running a scan; host is added to the results tree so all subsequent operations work normally, and gets the same reverse-DNS and Redfish enrichment a scan gives it
 - **Recent Connections** — File > Recent Connections lists the last 5 hosts connected to, newest first, one entry per IP; selecting one reconnects straight away if this session already holds its credentials, otherwise opens Connect to BMC pre-filled with IP and username. Saved to `config.json` (IP and username only)
@@ -186,6 +192,10 @@ The name reflects the project's purpose: visibility, remote control, and infrast
 What each vendor gets today, and how far it has been checked. "Capture" means checked against a
 read-only `scripts/fy-capture.sh` capture of that BMC, "hardware" means used on the BMC itself
 (see Tested Hardware).
+
+The IPMI column's hardware checks were made with `ipmitool`, before 0.9.0. Since 0.9.0 fyrtaarn
+sends IPMI itself (see "IPMI without ipmitool"); that has been checked on the Quanta only. On
+every other BMC it is unchecked, and `FYRTAARN_IPMI=ipmitool` gives the checked behaviour.
 
 | Vendor / BMC | IPMI (info, sensors, SOL, power, users) | Virtual media | Other |
 |---|---|---|---|
@@ -503,6 +513,16 @@ Since 0.9.0 fyrtaarn sends its IPMI commands itself, through the pure-Go
 [go-ipmi](https://github.com/bougou/go-ipmi) library (Apache-2.0), instead of running `ipmitool`.
 Every command fyrtaarn uses has moved; `ipmitool` remains as the fallback.
 
+From 0.9.1 fyrtaarn builds go-ipmi from a fork,
+[knightmare2600/go-ipmi](https://github.com/knightmare2600/go-ipmi) (branch `fyrtaarn`, pinned
+by commit in `go.mod`'s `replace` line), which is upstream go-ipmi plus four fixes offered back
+upstream: [#113](https://github.com/bougou/go-ipmi/pull/113) (Set User Payload Access sent an
+empty request), [#114](https://github.com/bougou/go-ipmi/pull/114) (Get SEL Info sent before every
+record), [#115](https://github.com/bougou/go-ipmi/pull/115) (one unreadable sensor emptied the
+sensor list) and [#116](https://github.com/bougou/go-ipmi/pull/116) (cipher suite 0 sessions never
+completed). fyrtaarn already worked round the first three itself; the fourth needs the library.
+Once upstream releases them, the `replace` line goes and fyrtaarn returns to upstream go-ipmi.
+
 | Commands | Sent by |
 |---|---|
 | BMC Info (`mc info`, `lan print`), chassis status, power on / off / reset / soft, Reset BMC (cold) | fyrtaarn, `ipmitool` as fallback |
@@ -789,6 +809,8 @@ sudo ./dist/fyrtaarn
 | All other keys / F1–F12| SOL Console       | Forwarded to BMC (incl. F2, F9)               |
 | V                      | BMC Info          | Virtual media dialog (Redfish)                |
 | Browse... (in V)       | Virtual media     | Pick a local image in a file browser          |
+| Fleet > Audit all hosts... | Menu          | Read-only audit of every BMC in the list      |
+| Enter / E (fleet audit) | Fleet audit      | A BMC's findings / export CSV or JSON         |
 | Enter                  | User list         | Open action dialog for user                   |
 | N                      | User list         | Create new user                               |
 | F9 > Connect to BMC    | Global            | Connect directly without scanning             |
@@ -883,15 +905,21 @@ For detailed technical writeups and excellent explanations of:
 
 ### Longer Term
 
-- native IPMI support in Go
+- native IPMI support in Go (done in 0.9.0: see "IPMI without ipmitool" under Requirements)
 - SSH tunnelling support
 - VPN-aware workflows
-- sensor dashboards
-- cluster / fleet operations
+- sensor dashboards (done in 0.8.0: the sensor dashboard)
+- cluster / fleet operations (in progress)
 
 ---
 
 ## Changelog
+
+### 0.9.1
+
+- **go-ipmi from a fork** — built from knightmare2600/go-ipmi (upstream plus four fixes offered as bougou/go-ipmi PRs #113-#116) until upstream releases them; among them, cipher suite 0 sessions now complete (they never did in go-ipmi v0.9.2). See "IPMI without ipmitool"
+- **Fleet audit** — Fleet > Audit all hosts... checks every BMC in the host list read-only: identity, power, administrators, cipher suite 0's privilege cap, the anonymous user, factory-default logins, IPMI 1.5 and known issues; table, per-BMC findings, CSV/JSON export (owner-only). Checked on the Quanta
+- **README** — TODO marks native IPMI and the sensor dashboard done; the provider table says its IPMI hardware checks predate 0.9.0's own IPMI
 
 ### 0.9.0
 

@@ -31,6 +31,10 @@ import (
 
 const backendEnv = "FYRTAARN_IPMI"
 
+// nativePort is the BMC's RMCP+ port; a variable so tests can point it at a
+// test BMC on an unprivileged port.
+var nativePort = 623
+
 // errNativeOff is returned by the native calls when the backend is not to
 // be used for this host; callers then run ipmitool.
 var errNativeOff = errors.New("native IPMI not in use for this host")
@@ -77,7 +81,7 @@ func withNative(host, user, pass string, timeout time.Duration, fn func(ctx cont
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	c, err := client.NewClient(host, 623, user, pass)
+	c, err := client.NewClient(host, nativePort, user, pass)
 	if err == nil {
 		// Administrator, as ipmitool asks for by default; per-message
 		// timeout and one retry, so a dead host fails inside the timeout.
