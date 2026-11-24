@@ -11,9 +11,13 @@
 #                   page of entries, NetworkProtocol, VirtualMedia slots),
 #                   accounts, firmware inventory, Chassis
 #                   (thermal/power/sensors) and SessionService
+#   vmedia/*        on an iLO, read-mode RIBCL replies (firmware version,
+#                   virtual media status); on any BMC, Dell's OS deployment
+#                   service by GET, and GetAttachStatus where it answers
 #   summary.txt     exit code / HTTP status and timing for every call
 #
-# Nothing here changes BMC state: ipmitool read commands and HTTP GETs only.
+# Nothing here changes BMC state: ipmitool read commands, HTTP GETs, RIBCL in
+# read mode, and Dell's GetAttachStatus query (a POST that only reports).
 # The password is read without echo and never written to disk or argv —
 # ipmitool gets it via -E, curl via a config file on a process-substitution fd.
 # Commands run one at a time (iDRAC9 refuses overlapping sessions).
@@ -181,9 +185,11 @@ PY
 # stalled an iLO 4 2.54's web server (no answer to anything for minutes, on
 # a production box). Its IPMI event log (sel-list) is captured above.
 ilo4=0
+ilo=0
 for m in $(members "$(rf auth /redfish/v1/Managers/)" | head -2); do
   case $(field "$(rf auth "$m")" FirmwareVersion) in
-    "iLO 4"*) ilo4=1 ;;
+    "iLO 4"*) ilo4=1; ilo=1 ;;
+    "iLO"*) ilo=1 ;;
   esac
 done
 
@@ -253,6 +259,51 @@ for c in $(members "$ch_col" | head -2); do
       rf auth "$l" >/dev/null
     fi
   done
+done
+
+# --- Virtual media protocols of other backends -----------------------------
+# fyrtaarn's iLO 3 backend speaks RIBCL to /ribcl, which iLO 4 and 5 still
+# answer; its iDRAC 7/8 backend uses Dell's OEM OS deployment service, which
+# iDRAC9 also has. Read-only here: RIBCL in MODE="read" (GET_FW_VERSION,
+# GET_VM_STATUS), Dell's two documented URI prefixes by GET, and on a Dell
+# that answers, GetAttachStatus (a POST, documented by Dell as a status
+# query; it attaches nothing). Raw replies are kept with their headers.
+mkdir -p "$out/vmedia"
+
+# ribcl <name> <RIB_INFO MODE> <command> : POST a RIBCL document. The
+# password is inside the XML, so the body goes to curl on a process-
+# substitution fd, never to disk or argv. XML specials in the password are
+# not escaped, as python-hpilo does not escape them.
+ribcl() {
+  local f=$out/vmedia/ribcl-$1.txt t0 code rc
+  t0=$(now_ms)
+  code=$(curl -sk --max-time 30 -D "$out/vmedia/ribcl-$1.headers" -o "$f" -w '%{http_code}' \
+    -H 'Content-Type: text/xml' \
+    --data-binary @<(printf '<?xml version="1.0"?>\r\n<RIBCL VERSION="2.0"><LOGIN USER_LOGIN="%s" PASSWORD="%s"><RIB_INFO MODE="%s">%s</RIB_INFO></LOGIN></RIBCL>\r\n' "$user" "$pw" "$2" "$3") \
+    "https://$ip/ribcl")
+  rc=$?
+  log "$(printf 'ribcl   %-26s http=%s curl=%-3d %6d ms' "$1" "$code" "$rc" $(( $(now_ms) - t0 )))"
+}
+
+if [ "$ilo" = 1 ]; then
+  ribcl fw-version read '<GET_FW_VERSION/>'
+  ribcl vm-status-cdrom read '<GET_VM_STATUS DEVICE="CDROM"/>'
+  ribcl vm-status-floppy read '<GET_VM_STATUS DEVICE="FLOPPY"/>'
+fi
+
+for base in /redfish/v1/Dell/Systems/System.Embedded.1/DellOSDeploymentService \
+            /redfish/v1/Systems/System.Embedded.1/Oem/Dell/DellOSDeploymentService; do
+  f=$(rf auth "$base")
+  if [ -s "$f" ] && grep -q '"@odata.id"\|"Actions"' "$f"; then
+    t0=$(now_ms)
+    g=$out/vmedia/dell-getattachstatus$(printf '%s' "$base" | tr '/' '_').json
+    code=$(curl -sk --max-time 30 -D "${g%.json}.headers" -o "$g" -w '%{http_code}' \
+      -K <(printf 'user = "%s:%s"\n' "$user" "$esc") \
+      -H 'Content-Type: application/json' --data-binary '{}' \
+      "https://$ip$base/Actions/DellOSDeploymentService.GetAttachStatus")
+    rc=$?
+    log "$(printf 'dell    GetAttachStatus %-44s http=%s curl=%-3d %6d ms' "$base" "$code" "$rc" $(( $(now_ms) - t0 )))"
+  fi
 done
 
 unset IPMITOOL_PASSWORD pw esc
