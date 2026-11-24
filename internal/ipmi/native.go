@@ -29,7 +29,10 @@ import (
 // before 0.9), "native" for native only with no fallback (for testing),
 // anything else or unset for native with fallback.
 
-const backendEnv = "FYRTAARN_IPMI"
+const backendEnv = BackendEnv
+
+// BackendEnv names the environment variable choosing the IPMI backend.
+const BackendEnv = "FYRTAARN_IPMI"
 
 // nativePort is the BMC's RMCP+ port; a variable so tests can point it at a
 // test BMC on an unprivileged port.

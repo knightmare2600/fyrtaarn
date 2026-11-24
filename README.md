@@ -201,7 +201,8 @@ read-only `scripts/fy-capture.sh` capture of that BMC, "hardware" means used on 
 
 The IPMI column's hardware checks were made with `ipmitool`, before 0.9.0. Since 0.9.0 fyrtaarn
 sends IPMI itself (see "IPMI without ipmitool"); that has been checked on the Quanta only. On
-every other BMC it is unchecked, and `FYRTAARN_IPMI=ipmitool` gives the checked behaviour.
+every other BMC it is unchecked, and `fyrtaarn -i` (or `FYRTAARN_IPMI=ipmitool`) gives the checked
+behaviour.
 
 | Vendor / BMC | IPMI (info, sensors, SOL, power, users) | Virtual media | Other |
 |---|---|---|---|
@@ -479,8 +480,11 @@ Its web interface dates from 2009 and its firmware build from 2013.
 - *What fyrtaarn does:* before touching the name, Delete User disables the account and sets it to
   NO ACCESS with link authentication off, so the slot grants nothing whatever the name step does.
   The kept name is reported rather than shown as a bare error.
-- *What you can do:* reuse the slot for the next account you create (Create sets a new name over
-  the old one), or rename it to something that marks it as free.
+- *What you can do:* delete the user in the BMC's own web interface (Configuration, Users,
+  Delete). It uses AMI's own call, `/rpc/deluser.asp`, which empties the slot completely,
+  name and IPMI messaging flag included: on the Quanta it returned the test slot to exactly the
+  state of the never-used slots, by both the web interface and `ipmitool user list`. Or reuse the
+  slot for the next account you create (Create sets a new name over the old one).
 - *Evidence:* the Quanta, 23 November 2026, with a test user in slot 10.
 
 **SOL access for a user cannot be set on "this channel"** (`payload-access-needs-lan-channel`)
@@ -554,6 +558,24 @@ the iLO 4 and the Quanta above.
 | `ipmi-over-lan-was-off` | HPE iLO 5 (FW 1.40) | IPMI over LAN was off on the one seen, so IPMI never answered while Redfish did | A failed connect checks it over Redfish and offers to switch it on; BMC > IPMI over LAN... | ProLiant ML350 Gen10 capture, 2026-11-23 |
 | `accounts-no-enabled-field` | HPE iLO 5 (FW 1.40) | Redfish accounts carry no Enabled or Locked field | Oem.Hpe.Privileges.LoginPriv is used for enabled | ProLiant ML350 Gen10 capture, 2026-11-23 |
 
+## Command line
+
+```
+fyrtaarn [options]
+
+  -h, --help      show the help and exit
+  -v, --version   show the version, build and IPMI library, and exit
+  -c, --check     check what fyrtaarn needs here and exit
+  -n, --native    IPMI through fyrtaarn's own client only, never ipmitool
+  -i, --ipmitool  IPMI through ipmitool only
+```
+
+`-v` also names the IPMI library the binary was built with, which shows whether it is upstream
+go-ipmi or the fork fyrtaarn builds while its fixes await upstream. `-c` reports `nmap` (required:
+it exits non-zero without it), `ipmitool` (optional, the fallback), whether it runs as root (scans
+then add UDP 623 and nmap's `ipmi-version` probe to TCP), pseudo-terminal support (needed only by
+the `ipmitool` SOL fallback) and the IPMI backend in force. `-n` and `-i` cannot be combined.
+
 ## Requirements
 
 `nmap` must be on your `PATH` at runtime, for discovery. `ipmitool` is optional from 0.9.0:
@@ -592,9 +614,10 @@ answer, so it is not asked again through `ipmitool`. The cipher suite workaround
 Issues still apply to both (`-C 3` hosts get suite 3 either way), although the library already
 copes with the Quanta's suite-17 refusal on its own: it connected without being told.
 
-`FYRTAARN_IPMI` overrides the choice: `FYRTAARN_IPMI=ipmitool` uses `ipmitool` only, as before;
-`FYRTAARN_IPMI=native` uses fyrtaarn's own IPMI only, with no fallback, which is the way to test a
-BMC against it.
+The command line overrides the choice: `fyrtaarn -i` (`--ipmitool`) uses `ipmitool` only, as
+before 0.9.0; `fyrtaarn -n` (`--native`) uses fyrtaarn's own IPMI only, with no fallback, which is
+the way to test a BMC against it. The environment variable `FYRTAARN_IPMI=ipmitool|native`, the
+only way before the options existed, does the same and still works; a flag overrides it.
 
 One cost: an address that does not answer IPMI at all now takes about 23 seconds to give up
 rather than 15, since fyrtaarn's own attempt waits 8 seconds before `ipmitool` is tried. That
@@ -968,6 +991,11 @@ For detailed technical writeups and excellent explanations of:
 ---
 
 ## Changelog
+
+### 0.9.3
+
+- **Command-line options** — `-h`/`--help`, `-v`/`--version` (with the IPMI library the binary was built from), `-c`/`--check` (nmap, ipmitool, root, pseudo-terminals, IPMI backend; non-zero without nmap), `-n`/`--native` and `-i`/`--ipmitool` (the IPMI backend, overriding `FYRTAARN_IPMI`)
+- **Known Issues** — `refuses-empty-user-name` (Quanta): the BMC's own web interface deletes a user completely, which IPMI cannot
 
 ### 0.9.2
 
