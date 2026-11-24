@@ -7,6 +7,9 @@ package ipmi
 // unreachable for a minute or two afterwards. Used on the iLO 4 in Tested
 // Hardware on 2026-11-23 to recover its stalled web server.
 func ColdResetBMC(host, user, pass string) error {
+	if err := nativeColdReset(host, user, pass); err != errNativeOff {
+		return err
+	}
 	_, err := runIPMICommand(host, user, pass, ipmiShortTimeout, "mc", "reset", "cold")
 	return err
 }

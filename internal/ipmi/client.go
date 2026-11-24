@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bougou/go-ipmi/pkg/command/chassis"
+
 	"github.com/knightmare2600/fyrtaarn/internal/ptyproc"
 	"github.com/knightmare2600/fyrtaarn/internal/quirks"
 )
@@ -298,14 +300,24 @@ func lastLine(s string) string {
 }
 
 func GetMCInfo(host, user, pass string) (*MCInfo, error) {
+	if info, err := nativeMCInfo(host, user, pass); err != errNativeOff {
+		return info, err
+	}
 	output, err := runIPMICommand(host, user, pass, ipmiShortTimeout, "mc", "info")
 	if err != nil {
+		// ipmitool failed too, so the native failure was not the library's
+		// (a wrong password, an unreachable host): let the next login try
+		// native again rather than leave the host on ipmitool for good.
+		nativeFailed.Delete(host)
 		return nil, err
 	}
 	return parseMCInfo(output), nil
 }
 
 func GetLANInfo(host, user, pass string) (*LANInfo, error) {
+	if info, err := nativeLANInfo(host, user, pass); err != errNativeOff {
+		return info, err
+	}
 	output, err := runIPMICommand(host, user, pass, ipmiShortTimeout, "lan", "print")
 	if err != nil {
 		return nil, err
@@ -314,6 +326,9 @@ func GetLANInfo(host, user, pass string) (*LANInfo, error) {
 }
 
 func GetChassisStatus(host, user, pass string) (*ChassisStatus, error) {
+	if st, err := nativeChassisStatus(host, user, pass); err != errNativeOff {
+		return st, err
+	}
 	output, err := runIPMICommand(host, user, pass, ipmiShortTimeout, "chassis", "status")
 	if err != nil {
 		return nil, err
@@ -322,6 +337,9 @@ func GetChassisStatus(host, user, pass string) (*ChassisStatus, error) {
 }
 
 func GetFRU(host, user, pass string) ([]FRUEntry, error) {
+	if entries, err := nativeFRU(host, user, pass); err != errNativeOff {
+		return entries, err
+	}
 	output, err := runIPMICommand(host, user, pass, ipmiShortTimeout, "fru")
 	if err != nil {
 		return nil, err
@@ -330,6 +348,9 @@ func GetFRU(host, user, pass string) ([]FRUEntry, error) {
 }
 
 func GetSDR(host, user, pass string) ([]SDREntry, error) {
+	if entries, err := nativeSDR(host, user, pass); err != errNativeOff {
+		return entries, err
+	}
 	output, err := runIPMICommand(host, user, pass, ipmiLongTimeout, "sdr", "list")
 	if err != nil {
 		return nil, err
@@ -338,6 +359,9 @@ func GetSDR(host, user, pass string) ([]SDREntry, error) {
 }
 
 func GetSEL(host, user, pass string) ([]SELEntry, error) {
+	if entries, err := nativeSEL(host, user, pass); err != errNativeOff {
+		return entries, err
+	}
 	output, err := runIPMICommand(host, user, pass, ipmiLongTimeout, "sel", "list")
 	if err != nil {
 		return nil, err
@@ -346,21 +370,33 @@ func GetSEL(host, user, pass string) ([]SELEntry, error) {
 }
 
 func PowerOn(host, user, pass string) error {
+	if err := nativeChassisControl(host, user, pass, chassis.ChassisControlPowerUp); err != errNativeOff {
+		return err
+	}
 	_, err := runIPMICommand(host, user, pass, ipmiShortTimeout, "chassis", "power", "on")
 	return err
 }
 
 func PowerOff(host, user, pass string) error {
+	if err := nativeChassisControl(host, user, pass, chassis.ChassisControlPowerDown); err != errNativeOff {
+		return err
+	}
 	_, err := runIPMICommand(host, user, pass, ipmiShortTimeout, "chassis", "power", "off")
 	return err
 }
 
 func PowerReset(host, user, pass string) error {
+	if err := nativeChassisControl(host, user, pass, chassis.ChassisControlHardReset); err != errNativeOff {
+		return err
+	}
 	_, err := runIPMICommand(host, user, pass, ipmiShortTimeout, "chassis", "power", "reset")
 	return err
 }
 
 func PowerSoft(host, user, pass string) error {
+	if err := nativeChassisControl(host, user, pass, chassis.ChassisControlSoftShutdown); err != errNativeOff {
+		return err
+	}
 	_, err := runIPMICommand(host, user, pass, ipmiShortTimeout, "chassis", "power", "soft")
 	return err
 }
@@ -379,6 +415,9 @@ const SOLEscapeChar byte = 0x1d
 // marked active, and every following "sol activate" then fails with "SOL
 // payload already active on another session".
 func SOLDeactivate(host, user, pass string) error {
+	if err := nativeSOLDeactivate(host, user, pass); err != errNativeOff {
+		return err
+	}
 	_, err := runIPMICommand(host, user, pass, ipmiShortTimeout, "sol", "deactivate")
 	return err
 }

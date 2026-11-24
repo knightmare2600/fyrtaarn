@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/knightmare2600/fyrtaarn/internal/ipmi"
 )
 
 func (a *App) renderMCInfo() string {
@@ -31,6 +33,7 @@ func (a *App) renderMCInfo() string {
 		if len(a.results) > 0 && a.selectedHost >= 0 && a.results[a.selectedHost].RedfishModel != "" {
 			b.WriteString(fmt.Sprintf("  %-24s %s\n", "Model:", a.results[a.selectedHost].RedfishModel))
 		}
+		b.WriteString(fmt.Sprintf("  %-24s %s\n", "IPMI via:", ipmi.BackendFor(hostIP)))
 		b.WriteString(knownIssuesLine(hostIP))
 		b.WriteString("\n")
 	}
@@ -134,27 +137,27 @@ func (a *App) renderSEL() string {
 		end = total
 	}
 
-	maxEventWidth := a.width - 30
-	if maxEventWidth < 30 {
-		maxEventWidth = 30
-	}
+	// Timestamps: 23 columns fit both forms, native "2026-02-24 16:07:50
+	// GMT" and ipmitool's locale form such as "24/02/26 16:07:50 GMT".
+	// The prefix (indent, ID, timestamp) takes 33 columns.
+	const tsW, prefixW = 23, 33
 
 	hdr := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(CurrentTheme.Accent))
-	b.WriteString(fmt.Sprintf("  %s\n", hdr.Render(fmt.Sprintf("%-6s %-20s %s", "ID", "Timestamp", "Event"))))
+	b.WriteString(fmt.Sprintf("  %s\n", hdr.Render(fmt.Sprintf("%-6s %-*s %s", "ID", tsW, "Timestamp", "Event"))))
 	b.WriteString(fmt.Sprintf("  %s\n", strings.Repeat("─", 70)))
 
 	for _, e := range a.selEntries[a.selOffset:end] {
-		event := e.Event
-		if len(event) > maxEventWidth {
-			event = event[:maxEventWidth]
-		}
 		dir := ""
 		if e.Direction != "" {
 			dir = " [" + e.Direction + "]"
 		}
+		event := e.Event
+		if maxEventWidth := max(a.width-prefixW-len(dir), 30); len(event) > maxEventWidth {
+			event = event[:maxEventWidth]
+		}
 		color := selEventColor(e.Direction, e.Event)
 		eventStr := lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Render(event + dir)
-		b.WriteString(fmt.Sprintf("  %-6s %-20s %s\n", e.ID, e.Timestamp, eventStr))
+		b.WriteString(fmt.Sprintf("  %-6s %-*s %s\n", e.ID, tsW, e.Timestamp, eventStr))
 	}
 
 	return b.String()

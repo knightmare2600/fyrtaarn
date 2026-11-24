@@ -404,6 +404,34 @@ Its web interface dates from 2009 and its firmware build from 2013.
   network, has no size limit and works on this BMC.
 - *Evidence:* the Quanta, 23 November 2026.
 
+**A deleted user keeps its name** (`refuses-empty-user-name`)
+
+- *What you see:* after Delete User, the slot still shows the old name, now disabled and with NO
+  ACCESS, and the status line says the BMC would not clear the name.
+- *Cause:* IPMI has no delete; a slot is freed by clearing its name, and this BMC refuses an empty
+  name ("invalid data field"). ipmitool's `user set name <id> ""` is refused in exactly the same
+  way, so it is the firmware, not fyrtaarn. It also will not switch IPMI messaging back off for the
+  slot, through either tool.
+- *What fyrtaarn does:* before touching the name, Delete User disables the account and sets it to
+  NO ACCESS with link authentication off, so the slot grants nothing whatever the name step does.
+  The kept name is reported rather than shown as a bare error.
+- *What you can do:* reuse the slot for the next account you create (Create sets a new name over
+  the old one), or rename it to something that marks it as free.
+- *Evidence:* the Quanta, 23 November 2026, with a test user in slot 10.
+
+**SOL access for a user cannot be set on "this channel"** (`payload-access-needs-lan-channel`)
+
+- *What you see:* with ipmitool, switching a user's SOL access on or off fails with "invalid data
+  field".
+- *Cause:* IPMI lets a client say channel 14, meaning "the channel this request arrived on",
+  instead of the LAN channel's number. This BMC accepts that for reading a user's SOL access but
+  refuses it for changing it; with the real number, 1, it works.
+- *What fyrtaarn does:* its own IPMI asks the BMC which channel the session is on and uses that
+  number. The ipmitool fallback still sends 14, so on this BMC the change only works through
+  fyrtaarn's own IPMI.
+- *Evidence:* the Quanta, 23 November 2026, with a test user in slot 10, through fyrtaarn and
+  through `ipmitool sol payload enable 14 10`.
+
 **Only obsolete TLS** (`legacy-tls-only`)
 
 - *What you see:* nothing in fyrtaarn. Current browsers, curl and OpenSSL 1.1 or later cannot open
@@ -455,6 +483,8 @@ the iLO 4 and the Quanta above.
 | `redfish-log-entries-stall` | HP iLO 4 (seen on FW 2.54; applied to all iLO 4 as a precaution) | Requesting the IML log entries over Redfish stalled its web server: no answer to Redfish or its web pages for at least 30 minutes, until an iLO reset (mc reset cold) | Redfish event log entries are not requested; the IPMI event log is used instead | ProLiant ML310e Gen8 v2, 2026-11-23 (production box): stalled about 16:00, still stalled about 16:30, reset by IPMI |
 | `jnlp-needs-extrnip` | Quanta, AMI MegaRAC SP (FW 7.54) | Requesting the JViewer launch file without EXTRNIP crashes its web server until a BMC reset | EXTRNIP is always sent (amiweb), and the web UI proxy rewrites it to the BMC's address | Quanta in Tested Hardware, 2026-11-23, reproduced with curl |
 | `lmedia-register-fails` | Quanta, AMI MegaRAC SP (FW 7.54) | LMedia uploads are accepted but registering the image returns status -1, for any image | Upload to BMC still offered, with a warning that it fails on this firmware | Quanta in Tested Hardware, 2026-11-23, identical with the browser's requests replayed |
+| `refuses-empty-user-name` | Quanta, AMI MegaRAC SP (FW 7.54) | Refuses Set User Name with an empty name ("invalid data field"), so a user's name cannot be cleared | Delete User revokes the account first (disabled, NO ACCESS, link auth and IPMI messaging off) and says the name stays | Quanta in Tested Hardware, 2026-11-23, test user in slot 10; ipmitool's "user set name 10 """ is refused the same way |
+| `payload-access-needs-lan-channel` | Quanta, AMI MegaRAC SP (FW 7.54) | Refuses Set User Payload Access on channel 14 ("this channel") although it reads payload access there; channel 1 works | fyrtaarn's own IPMI asks the BMC for its LAN channel number and uses that; the ipmitool fallback still sends 14 | Quanta in Tested Hardware, 2026-11-23, test user in slot 10, with fyrtaarn and with ipmitool's "sol payload enable 14 10" |
 | `legacy-tls-only` | Hosts whose HTTPS only works with the legacy TLS client (seen: Quanta, TLS 1.0 RC4-MD5) (detected at run time) | No TLS that Go or current browsers accept | legacytls falls back to its own TLS 1.0/1.1 RC4 client; the web UI proxy shows the negotiated TLS | Quanta in Tested Hardware, 2026-11-23 |
 | `no-concurrent-sessions` | Dell iDRAC9 (FW 4.20) | Refuses overlapping IPMI session set-ups ("insufficient resources for session") | One IPMI command at a time per BMC, for every vendor | iDRAC9 in Tested Hardware, 2026-10 |
 | `ipmi-over-lan-was-off` | HPE iLO 5 (FW 1.40) | IPMI over LAN was off on the one seen, so IPMI never answered while Redfish did | A failed connect checks it over Redfish and offers to switch it on; BMC > IPMI over LAN... | ProLiant ML350 Gen10 capture, 2026-11-23 |
@@ -462,11 +492,125 @@ the iLO 4 and the Quanta above.
 
 ## Requirements
 
-Both `nmap` and `ipmitool` must be on your `PATH` at runtime.
+`nmap` must be on your `PATH` at runtime, for discovery. `ipmitool` is optional from 0.9.0:
+fyrtaarn sends its IPMI commands itself, and runs `ipmitool` only for a BMC its own IPMI cannot
+set up a session with (or when told to, below). Keeping `ipmitool` installed keeps that fallback.
+Redfish uses Go's built-in HTTP client and needs neither tool.
 
-> **Note:** `nmap` is required for discovery. `ipmitool` is only required for BMC
-> management commands (sensors, SEL, FRU, power). Redfish probing uses Go's built-in
-> HTTP client and needs neither tool.
+### IPMI without ipmitool
+
+Since 0.9.0 fyrtaarn sends its IPMI commands itself, through the pure-Go
+[go-ipmi](https://github.com/bougou/go-ipmi) library (Apache-2.0), instead of running `ipmitool`.
+Every command fyrtaarn uses has moved; `ipmitool` remains as the fallback.
+
+| Commands | Sent by |
+|---|---|
+| BMC Info (`mc info`, `lan print`), chassis status, power on / off / reset / soft, Reset BMC (cold) | fyrtaarn, `ipmitool` as fallback |
+| sensors (`sdr list`), the sensor dashboard, event log (`sel list`), FRU, user list, SOL settings (reading) | fyrtaarn, `ipmitool` as fallback |
+| changing users (enable, disable, password, name, privilege, create, delete) and a user's SOL access | fyrtaarn, `ipmitool` as fallback |
+| the SOL console | fyrtaarn, `ipmitool` in a terminal as fallback |
+| switching SOL on or off for the BMC | fyrtaarn, `ipmitool` as fallback |
+
+BMC Info shows which one a host is on (`IPMI via:`). If fyrtaarn cannot set up its own IPMI
+session with a BMC, that BMC uses `ipmitool` for the rest of the run, and BMC Info says why. A
+BMC that accepts the session but refuses a command is reported as refusing it; that is the BMC's
+answer, so it is not asked again through `ipmitool`. The cipher suite workarounds under Known
+Issues still apply to both (`-C 3` hosts get suite 3 either way), although the library already
+copes with the Quanta's suite-17 refusal on its own: it connected without being told.
+
+`FYRTAARN_IPMI` overrides the choice: `FYRTAARN_IPMI=ipmitool` uses `ipmitool` only, as before;
+`FYRTAARN_IPMI=native` uses fyrtaarn's own IPMI only, with no fallback, which is the way to test a
+BMC against it.
+
+One cost: an address that does not answer IPMI at all now takes about 23 seconds to give up
+rather than 15, since fyrtaarn's own attempt waits 8 seconds before `ipmitool` is tried. That
+happens once per such host.
+
+#### Where it follows ipmitool, and where it does not
+
+The point of the move is to drop the dependency, not to change what fyrtaarn shows, so the text
+of each list is built the way ipmitool builds it, from ipmitool's own rules and tables rather
+than the library's:
+
+- **Sensors** follow ipmitool 1.8.19's `sdr list` (`lib/ipmi_sdr.c`): only full and compact
+  sensor records; a whole-number reading without decimals and any other with two (`19 degrees
+  C`, `1.79 Volts`); `no reading`, `Not Readable` or `disabled` when there is no valid reading;
+  status `ok`, `nc`, `cr`, `nr` or `ns`. The dashboard's refresh follows `sensor reading`, three
+  decimals. A sensor owned by a controller other than the BMC (a management engine on the IPMB,
+  say) is read through the BMC with Send Message, as ipmitool does. ipmitool accepts that
+  controller's reply in either of the two ways a BMC may deliver it, inside the Send Message reply
+  or as a second packet after it; fyrtaarn's IPMI library can only receive the first, so a sensor
+  answered the second way is listed with no reading. Not yet checked on hardware: the Quanta has
+  no such sensors, and the captures so far do not record owners (`scripts/fy-capture.sh` now
+  saves the raw repository as `ipmi/sdr.bin`, which does).
+- **The event log** uses ipmitool's sensor type names and event descriptions, generated from
+  ipmitool 1.8.19's own tables (`include/ipmitool/ipmi_sel.h`, `lib/ipmi_strings.c`) by
+  `scripts/gen-ipmi-tables.py` into `internal/ipmi/ipmitool_tables_gen.go`, which keeps their
+  Sun Microsystems BSD licence notice. The library has tables of its own, but they are worded
+  differently and ignore event data 2, so `No video device selected` became a bare `System
+  Firmware Error (POST Error)`. Not carried over: ipmitool's Dell, Supermicro and Quanta OEM
+  suffixes and its OEM event types.
+- **Dates** are the one deliberate change. ipmitool prints the event log's and FRU's dates in
+  the machine's locale (`24/02/26` on a British system, `02/24/26` on an American one);
+  fyrtaarn prints `2026-02-24 16:07:50 GMT`, in local time, which reads the same everywhere.
+- **LAN settings** are read on the LAN channel the session arrives on. The Quanta refuses the
+  "this channel" shorthand (0x0E) for LAN settings although it takes it for users and SOL, so
+  fyrtaarn asks the BMC which channel that is, falling back to the first LAN channel, as
+  ipmitool does.
+
+The library's own event log read asks the BMC for its log summary before every entry; fyrtaarn
+asks once, as ipmitool does, which halves the time (17 seconds instead of 34 for the Quanta's 909
+entries).
+
+- **User changes** follow ipmitool's `user` and `channel setaccess` commands and its limits: a
+  name of at most 16 bytes, a password of at most 20, stored in 20-byte form when over 16. The
+  library pads or quietly truncates to the size it is given, so fyrtaarn checks the lengths first
+  and refuses what ipmitool would refuse. The password travels only inside the IPMI session.
+  Create User sets the privilege on the LAN channel the session uses; it used to send channel 1,
+  which is not the LAN channel on every BMC (an iLO's is 2). Delete User now also revokes the
+  account (disabled, NO ACCESS, link authentication off) before clearing the name, so a slot whose
+  name cannot be cleared grants nothing; see `refuses-empty-user-name` under Known Issues.
+
+- **The SOL console** runs over fyrtaarn's own IPMI session into the same console pane, so
+  everything on screen and every key works as before. It needs no pseudo-terminal, so on Windows
+  it also works without ConPTY. Keys go to the server unchanged; F10 deactivates SOL and closes the
+  session. A refusal because another session holds SOL uses ipmitool's wording, so the take-over
+  offer appears as before. One addition: every 5 seconds the console checks that the BMC still has
+  SOL assigned to its session. ipmitool's console does not notice when another session takes SOL
+  over while nothing is being typed or printed; fyrtaarn's now ends with "another session
+  deactivated or took over the SOL payload".
+
+#### Checked
+
+Against the Quanta in Tested Hardware, each list compared entry by entry with `ipmitool`'s on the
+same BMC: BMC Info, LAN, chassis status, all 85 sensors, all 909 events (descriptions, IDs and
+directions), both FRU devices, all ten user slots and the SOL settings are identical, apart from
+the date format above and readings that moved between the two reads (a 3.3 V rail stepping
+between 3.300 and 3.315). Timings: sensors 5 s against 27 s, FRU 3 s, event log 17 s either way.
+User changes were checked on the Quanta with a test user in an empty slot (10), each step read
+back with `ipmitool` and, where it matters, by logging in as the test user: create (name,
+password, enable, privilege), a 16- and a 20-byte password (the old one then refused), a 21-byte
+password and a 17-byte name refused before anything was sent, privilege change, disable (login
+refused) and enable (login works), rename, SOL access on and off, and delete. The other nine
+slots were untouched. Slot 10 was left disabled with NO ACCESS and a random password; it keeps
+the test name, which this BMC will not clear.
+
+Switching SOL off and on was checked on the Quanta, each change read back with `ipmitool sol
+info`; while it was off, a console was refused as "SOL payload disabled". It was left on, as it
+was found.
+
+The SOL console was checked on the Quanta with its server powered off, so no console output was
+seen: while fyrtaarn's console was open, `ipmitool sol activate` was refused as "already active
+on another session"; keys were accepted; it stayed up through 35 idle seconds; F10 closed it in
+under a second and SOL could be activated again at once; a second console was refused with
+ipmitool's wording; a take-over from another session was noticed within 2.3 seconds and the new
+owner's console was left running. Output from a running server is not yet checked.
+
+Power control and Reset BMC through fyrtaarn's own IPMI are not yet checked on hardware, and nor
+is any iLO or iDRAC.
+
+Like `ipmitool` without `-L`, fyrtaarn asks for an Administrator session, so an account limited to
+USER or OPERATOR cannot log in to fyrtaarn over IPMI.
 
 ### Linux
 
@@ -748,6 +892,21 @@ For detailed technical writeups and excellent explanations of:
 ---
 
 ## Changelog
+
+### 0.9.0
+
+- **IPMI without ipmitool, first group** — BMC Info, chassis status, power control and Reset BMC are sent by fyrtaarn itself through go-ipmi, with `ipmitool` as the per-host fallback; `FYRTAARN_IPMI=ipmitool|native` overrides; BMC Info shows `IPMI via:`. See "IPMI without ipmitool" under Requirements
+- **IPMI without ipmitool, second group** — LAN settings, sensors and the sensor dashboard, event log, FRU, the user list and SOL settings, each built to read as ipmitool's output, the event log from ipmitool's own description tables; identical to ipmitool on the Quanta except for an unambiguous date format. Sensors list in 5 s instead of 27 s
+- **IPMI without ipmitool, user changes** — enable, disable, password, name, privilege, create, delete and a user's SOL access are sent by fyrtaarn itself, with ipmitool's name and password limits checked first. Checked on the Quanta with a test user
+- **Create User** sets the privilege on the LAN channel the session uses instead of channel 1 (an iLO's LAN channel is 2)
+- **Delete User** revokes the account (disabled, NO ACCESS, link authentication off) before clearing the name, and says so when the BMC keeps the name (new Known Issue `refuses-empty-user-name`, Quanta)
+- **SOL access per user** works on the Quanta through fyrtaarn's own IPMI, which uses the BMC's LAN channel number; it refuses "this channel" (new Known Issue `payload-access-needs-lan-channel`)
+- **IPMI without ipmitool, SOL console** — the console runs over fyrtaarn's own IPMI session, with ipmitool in a terminal as fallback; works on Windows without ConPTY; notices within seconds when another session takes SOL over
+- **IPMI without ipmitool, the rest** — switching SOL on or off for the BMC; sensors owned by another controller are read through the BMC (Send Message), as ipmitool does, where the BMC embeds the reply (not yet checked on hardware)
+- **Capture script** — also saves the raw sensor repository (`ipmi/sdr.bin`), which records each sensor's owner
+- **Corrected** — an earlier note said the Quanta's sensor 0x9d belongs to another controller; it is the BMC's own and simply does not answer while the server is off
+- **SOL on a powered-off server** — the dialog offers "Open SOL only" beside "Power On + Open SOL", to connect without powering on
+- **Event log** — the timestamp column is wide enough for its timestamps (it was one column short even for ipmitool's)
 
 ### 0.8.2
 

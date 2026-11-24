@@ -148,6 +148,10 @@ ipmi mc-info        mc info
 ipmi lan-print      lan print
 ipmi chassis-status chassis status
 ipmi sdr-list       sdr list
+# The raw sensor repository, which records each sensor's owner (the BMC or
+# another controller): fyrtaarn reads other owners' sensors through the BMC,
+# and no capture so far shows whether any BMC here has such sensors.
+ipmi sdr-dump       sdr dump "$out/ipmi/sdr.bin"
 ipmi sel-list       sel list
 ipmi fru            fru
 ipmi user-list      user list

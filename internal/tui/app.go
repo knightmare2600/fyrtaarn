@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -671,7 +672,7 @@ func runUserSetName(host, adminUser, adminPass string, userID int, name string) 
 
 func runUserSetPrivilege(host, adminUser, adminPass string, userID, level int) tea.Cmd {
 	return func() tea.Msg {
-		err := ipmi.SetUserPrivilege(host, adminUser, adminPass, userID, 1, level)
+		err := ipmi.SetUserPrivilege(host, adminUser, adminPass, userID, 0, level) // 0: this session's LAN channel
 		return userActionMsg{Action: "set-privilege", Err: err}
 	}
 }
@@ -1051,12 +1052,18 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case userActionMsg:
 		a.ipmiLoading = false
-		if msg.Err != nil {
+		switch {
+		case errors.Is(msg.Err, ipmi.ErrNameKept):
+			// Revoked, but the BMC keeps the name: report it and refresh the
+			// list, which shows the slot disabled with NO ACCESS.
+			a.status = "User delete: " + msg.Err.Error()
+		case msg.Err != nil:
 			a.status = fmt.Sprintf("User %s error: %s", msg.Action, msg.Err.Error())
 			a.currentScreen = screenUsers
 			return a, nil
+		default:
+			a.status = fmt.Sprintf("User %s: done", msg.Action)
 		}
-		a.status = fmt.Sprintf("User %s: done", msg.Action)
 		// Re-fetch the user list so the display reflects the change.
 		if len(a.results) > 0 {
 			host := a.results[a.selectedHost].IP
@@ -2229,9 +2236,10 @@ func (a *App) updateMCInfo(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		host := a.results[a.selectedHost].IP
-		if !solPaneSupported {
+		if !solPaneSupported && !ipmi.UsesNative(host) {
 			// Say so up front rather than after a chassis check and a
-			// power-on prompt that would end in an error.
+			// power-on prompt that would end in an error. fyrtaarn's own
+			// IPMI needs no pty, so only an ipmitool host is refused.
 			a.activeDialog = NewSOLUnsupportedDialog(host, a.username)
 			return a, nil
 		}

@@ -27,7 +27,7 @@ func TestKnownBMCs(t *testing.T) {
 	cases := map[string]string{
 		"ilo4":   "no-cipher-suite-list,redfish-log-entries-stall",
 		"ilo5":   "ipmi-over-lan-was-off,accounts-no-enabled-field",
-		"quanta": "refuses-auto-cipher-suite,jnlp-needs-extrnip,lmedia-register-fails",
+		"quanta": "refuses-auto-cipher-suite,jnlp-needs-extrnip,lmedia-register-fails,refuses-empty-user-name,payload-access-needs-lan-channel",
 		"idrac":  "no-concurrent-sessions",
 		"other":  "",
 	}

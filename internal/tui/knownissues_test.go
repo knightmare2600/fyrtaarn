@@ -30,7 +30,7 @@ func TestKnownIssuesQuanta(t *testing.T) {
 	info := &ipmi.MCInfo{FirmwareRevision: "7.54", ManufacturerID: quirks.MfrQuanta, ProductID: 0x3252}
 	a.Update(mcInfoMsg{Info: info})
 	quirks.Learn("192.168.139.4", quirks.LegacyTLSOnly) // as the TLS fallback does
-	if !strings.Contains(a.renderMCInfo(), "Known issues:            4  [K] details") {
+	if !strings.Contains(a.renderMCInfo(), "Known issues:            6  [K] details") {
 		t.Fatalf("BMC Info:\n%s", a.renderMCInfo())
 	}
 	a.updateMCInfo(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})

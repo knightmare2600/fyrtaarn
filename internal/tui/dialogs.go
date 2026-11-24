@@ -585,9 +585,11 @@ func NewSOLLaunchDialog(host string, powerOn bool) *Dialog {
 			"The chassis on %s is currently off.\n\n"+
 				"Power it on and open the SOL console now?\n"+
 				"The console connects immediately so you can\n"+
-				"watch the full boot sequence from BIOS.", host),
+				"watch the full boot sequence from BIOS.\n"+
+				"Open SOL only connects and leaves it off.", host),
 		buttons: []DialogButton{
 			{Label: "Power On + Open SOL", Action: "power-on-sol"},
+			{Label: "Open SOL only", Action: "open-sol"}, // leave the server off
 			{Label: "Cancel", Action: "cancel"},
 		},
 		focus: 0,

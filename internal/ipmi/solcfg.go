@@ -1,9 +1,13 @@
 package ipmi
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/bougou/go-ipmi/pkg/client"
+	"github.com/bougou/go-ipmi/pkg/types"
 )
 
 // SOL configuration: whether the BMC offers SOL at all ("sol info", SOL
@@ -33,6 +37,9 @@ type SOLSettings struct {
 
 // GetSOLSettings reads SOL info and the logged-in user's payload access.
 func GetSOLSettings(host, user, pass string) (SOLSettings, error) {
+	if s, err := nativeSOLSettings(host, user, pass); err != errNativeOff {
+		return s, err
+	}
 	out, err := runIPMICommand(host, user, pass, ipmiShortTimeout, "sol", "info", thisChannel)
 	if err != nil {
 		return SOLSettings{}, err
@@ -96,6 +103,18 @@ func parsePayloadStatus(out string) string {
 
 // SetSOLEnabled switches SOL on or off for the BMC.
 func SetSOLEnabled(host, user, pass string, on bool) error {
+	// Natively on the BMC's LAN channel number rather than 14 ("this
+	// channel"): the Quanta refuses 14 for other SOL and payload changes
+	// (quirks.PayloadAccessNeedsLAN), and the real number works everywhere.
+	if err := nativeUserOp(host, user, pass, func(ctx context.Context, c *client.Client) error {
+		ch, err := lanChannel(ctx, c)
+		if err != nil {
+			return err
+		}
+		return c.SetSOLConfigParamFor(ctx, ch, &types.SOLConfigParam_SOLEnable{EnableSOLPayload: on})
+	}); err != errNativeOff {
+		return err
+	}
 	_, err := runIPMICommand(host, user, pass, ipmiShortTimeout,
 		"sol", "set", "enabled", strconv.FormatBool(on), thisChannel)
 	return err
@@ -105,6 +124,11 @@ func SetSOLEnabled(host, user, pass string, on bool) error {
 func SetSOLPayload(host, user, pass string, userID int, on bool) error {
 	if userID <= 0 {
 		return fmt.Errorf("no user ID for %s", user)
+	}
+	if err := nativeUserOp(host, user, pass, func(ctx context.Context, c *client.Client) error {
+		return setSOLPayload(ctx, c, userID, on)
+	}); err != errNativeOff {
+		return err
 	}
 	verb := "disable"
 	if on {

@@ -1,9 +1,12 @@
 package ipmi
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/bougou/go-ipmi/pkg/client"
 )
 
 type UserEntry struct {
@@ -19,6 +22,9 @@ type UserEntry struct {
 }
 
 func GetUsers(host, user, pass string) ([]UserEntry, error) {
+	if users, err := nativeUsers(host, user, pass); err != errNativeOff {
+		return users, err
+	}
 	output, err := runIPMICommand(host, user, pass, ipmiShortTimeout, "user", "list")
 	if err != nil {
 		return nil, err
@@ -74,12 +80,22 @@ func applyEnableStatus(users []UserEntry, status map[int]bool) {
 }
 
 func EnableUser(host, adminUser, adminPass string, userID int) error {
+	if err := nativeUserOp(host, adminUser, adminPass, func(ctx context.Context, c *client.Client) error {
+		return c.EnableUser(ctx, uint8(userID))
+	}); err != errNativeOff {
+		return err
+	}
 	_, err := runIPMICommand(host, adminUser, adminPass, ipmiShortTimeout,
 		"user", "enable", strconv.Itoa(userID))
 	return err
 }
 
 func DisableUser(host, adminUser, adminPass string, userID int) error {
+	if err := nativeUserOp(host, adminUser, adminPass, func(ctx context.Context, c *client.Client) error {
+		return c.DisableUser(ctx, uint8(userID))
+	}); err != errNativeOff {
+		return err
+	}
 	_, err := runIPMICommand(host, adminUser, adminPass, ipmiShortTimeout,
 		"user", "disable", strconv.Itoa(userID))
 	return err
@@ -87,6 +103,11 @@ func DisableUser(host, adminUser, adminPass string, userID int) error {
 
 func SetUserPassword(host, adminUser, adminPass string, userID int, newPass string) error {
 	defer wipeString(&newPass)
+	if err := nativeUserOp(host, adminUser, adminPass, func(ctx context.Context, c *client.Client) error {
+		return setUserPassword(ctx, c, userID, newPass)
+	}); err != errNativeOff {
+		return err
+	}
 	// Omitting the password makes ipmitool prompt for it twice (getpass),
 	// keeping it out of argv; see runIPMIPrompted.
 	_, err := runIPMIPrompted(host, adminUser, adminPass, ipmiShortTimeout,
@@ -96,16 +117,39 @@ func SetUserPassword(host, adminUser, adminPass string, userID int, newPass stri
 }
 
 func SetUserName(host, adminUser, adminPass string, userID int, name string) error {
+	if err := nativeUserOp(host, adminUser, adminPass, func(ctx context.Context, c *client.Client) error {
+		return setUserName(ctx, c, userID, name)
+	}); err != errNativeOff {
+		return err
+	}
 	_, err := runIPMICommand(host, adminUser, adminPass, ipmiShortTimeout,
 		"user", "set", "name", strconv.Itoa(userID), name)
 	return err
 }
 
 // CreateUser provisions a previously empty slot: sets name, password,
-// enables the account, and applies the channel privilege level.
+// enables the account, and applies the channel privilege level on the LAN
+// channel this session uses. Natively all four steps share one session.
 // privilege: 2=USER, 3=OPERATOR, 4=ADMINISTRATOR, 5=OEM
 func CreateUser(host, adminUser, adminPass string, userID int, name, password string, privilege int) error {
 	defer wipeString(&password)
+	if err := nativeUserOp(host, adminUser, adminPass, func(ctx context.Context, c *client.Client) error {
+		if err := setUserName(ctx, c, userID, name); err != nil {
+			return fmt.Errorf("set name: %w", err)
+		}
+		if err := setUserPassword(ctx, c, userID, password); err != nil {
+			return fmt.Errorf("set password: %w", err)
+		}
+		if err := c.EnableUser(ctx, uint8(userID)); err != nil {
+			return fmt.Errorf("enable: %w", err)
+		}
+		if err := setUserAccess(ctx, c, userID, 0, privilege); err != nil {
+			return fmt.Errorf("set privilege: %w", err)
+		}
+		return nil
+	}); err != errNativeOff {
+		return err
+	}
 	if err := SetUserName(host, adminUser, adminPass, userID, name); err != nil {
 		return fmt.Errorf("set name: %w", err)
 	}
@@ -115,7 +159,7 @@ func CreateUser(host, adminUser, adminPass string, userID int, name, password st
 	if err := EnableUser(host, adminUser, adminPass, userID); err != nil {
 		return fmt.Errorf("enable: %w", err)
 	}
-	if err := SetUserPrivilege(host, adminUser, adminPass, userID, 1, privilege); err != nil {
+	if err := SetUserPrivilege(host, adminUser, adminPass, userID, 0, privilege); err != nil {
 		return fmt.Errorf("set privilege: %w", err)
 	}
 	return nil
@@ -124,6 +168,11 @@ func CreateUser(host, adminUser, adminPass string, userID int, name, password st
 // DeleteUser disables a user account and clears its name, effectively freeing
 // the slot. IPMI has no true delete command; this is the standard approach.
 func DeleteUser(host, adminUser, adminPass string, userID int) error {
+	if err := nativeUserOp(host, adminUser, adminPass, func(ctx context.Context, c *client.Client) error {
+		return deleteUser(ctx, c, host, userID)
+	}); err != errNativeOff {
+		return err
+	}
 	if err := DisableUser(host, adminUser, adminPass, userID); err != nil {
 		return fmt.Errorf("disable: %w", err)
 	}
@@ -132,7 +181,17 @@ func DeleteUser(host, adminUser, adminPass string, userID int) error {
 
 // SetUserPrivilege sets the channel privilege level for a user.
 // level: 1=CALLBACK, 2=USER, 3=OPERATOR, 4=ADMINISTRATOR
+// channel 0 means the LAN channel this session uses: natively the BMC is
+// asked which that is; ipmitool is given 14 (0x0E, "this channel").
 func SetUserPrivilege(host, adminUser, adminPass string, userID, channel, level int) error {
+	if err := nativeUserOp(host, adminUser, adminPass, func(ctx context.Context, c *client.Client) error {
+		return setUserAccess(ctx, c, userID, channel, level)
+	}); err != errNativeOff {
+		return err
+	}
+	if channel == 0 {
+		channel = 14
+	}
 	_, err := runIPMICommand(host, adminUser, adminPass, ipmiShortTimeout,
 		"channel", "setaccess", strconv.Itoa(channel),
 		strconv.Itoa(userID),

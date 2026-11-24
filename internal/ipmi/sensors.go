@@ -34,6 +34,9 @@ func SDRCachePath(host string) (string, error) {
 // existing regular file and refuses a symlink (ipmi_open_file in
 // lib/helper.c).
 func DumpSDR(host, user, pass, path string) error {
+	if err := nativeDumpSDR(host, user, pass); err != errNativeOff {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -55,6 +58,16 @@ type SensorReading struct {
 func ReadSensors(host, user, pass, cache string, names []string) ([]SensorReading, error) {
 	if len(names) == 0 {
 		return nil, nil
+	}
+	if rs, err := nativeReadSensors(host, user, pass, names); err != errNativeOff {
+		return rs, err
+	}
+	// The repository may have been read natively (no file) before this
+	// host fell back to ipmitool: dump it now.
+	if _, err := os.Stat(cache); err != nil {
+		if err := DumpSDR(host, user, pass, cache); err != nil {
+			return nil, err
+		}
 	}
 	args := append([]string{"-S", cache, "sensor", "reading"}, names...)
 	out, err := runIPMIKeepOutput(host, user, pass, sensorReadTimeout, args...)

@@ -37,6 +37,8 @@ const (
 	NoConcurrentSessions   ID = "no-concurrent-sessions"
 	IPMIOverLANWasOff      ID = "ipmi-over-lan-was-off"
 	AccountsNoEnabledField ID = "accounts-no-enabled-field"
+	RefusesEmptyUserName   ID = "refuses-empty-user-name"
+	PayloadAccessNeedsLAN  ID = "payload-access-needs-lan-channel"
 )
 
 // IANA enterprise numbers as reported by "mc info" (Manufacturer ID).
@@ -140,6 +142,20 @@ var Known = []Quirk{
 		Effect:   "LMedia uploads are accepted but registering the image returns status -1, for any image",
 		Handling: "Upload to BMC still offered, with a warning that it fails on this firmware",
 		Source:   "Quanta in Tested Hardware, 2026-11-23, identical with the browser's requests replayed",
+		match:    isQuantaAMI754,
+	},
+	{
+		ID: RefusesEmptyUserName, BMC: "Quanta, AMI MegaRAC SP (FW 7.54)",
+		Effect:   "Refuses Set User Name with an empty name (\"invalid data field\"), so a user's name cannot be cleared",
+		Handling: "Delete User revokes the account first (disabled, NO ACCESS, link auth and IPMI messaging off) and says the name stays",
+		Source:   "Quanta in Tested Hardware, 2026-11-23, test user in slot 10; ipmitool's \"user set name 10 \"\"\" is refused the same way",
+		match:    isQuantaAMI754,
+	},
+	{
+		ID: PayloadAccessNeedsLAN, BMC: "Quanta, AMI MegaRAC SP (FW 7.54)",
+		Effect:   "Refuses Set User Payload Access on channel 14 (\"this channel\") although it reads payload access there; channel 1 works",
+		Handling: "fyrtaarn's own IPMI asks the BMC for its LAN channel number and uses that; the ipmitool fallback still sends 14",
+		Source:   "Quanta in Tested Hardware, 2026-11-23, test user in slot 10, with fyrtaarn and with ipmitool's \"sol payload enable 14 10\"",
 		match:    isQuantaAMI754,
 	},
 	{

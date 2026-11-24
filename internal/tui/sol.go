@@ -138,6 +138,18 @@ func newSolPane(con ptyproc.Console, cols, rows int) *solPane {
 	}
 }
 
+// startSolConsole wraps a console that is already running (fyrtaarn's own
+// IPMI SOL session) in a pane, reaping it as startSolProcess does.
+func startSolConsole(con ptyproc.Console, cols, rows int) *solPane {
+	p := newSolPane(con, cols, rows)
+	p.exited = make(chan struct{})
+	go func() {
+		p.exitErr = con.Wait()
+		close(p.exited)
+	}()
+	return p
+}
+
 // startSolProcess runs cmd inside a pseudo-terminal and returns a pane that
 // owns both. A goroutine reaps the process so it never lingers as a zombie
 // and so shutdown and listenSOL can tell when it has gone.
@@ -706,6 +718,19 @@ const solInUseMarker = "already active on another session"
 // may be a colleague's live console rather than a stale one.
 func startSOLPane(host, user, pass string, cols, rows int, takeover bool) tea.Cmd {
 	return func() tea.Msg {
+		// fyrtaarn's own IPMI first: it needs no pty, so it also runs where
+		// ConPTY is missing. ipmitool in a pty is the fallback.
+		if takeover {
+			_ = ipmi.SOLDeactivate(host, user, pass)
+		}
+		con, err := ipmi.StartNativeSOL(host, user, pass)
+		if err == nil {
+			return solPaneReadyMsg{pane: startSolConsole(con, cols, rows)}
+		}
+		if !ipmi.IsNativeOff(err) {
+			return solReadMsg{Err: err}
+		}
+		takeover = false // already sent
 		if !solPaneSupported {
 			return solReadMsg{Err: fmt.Errorf("built-in SOL pane needs ConPTY (Windows 10 1809 or later)")}
 		}
