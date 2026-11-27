@@ -589,15 +589,16 @@ Since 0.9.0 fyrtaarn sends its IPMI commands itself, through the pure-Go
 [go-ipmi](https://github.com/bougou/go-ipmi) library (Apache-2.0), instead of running `ipmitool`.
 Every command fyrtaarn uses has moved; `ipmitool` remains as the fallback.
 
-From 0.9.1 fyrtaarn builds go-ipmi from a fork,
+From 0.9.1 to 0.9.3 fyrtaarn built go-ipmi from a fork,
 [knightmare2600/go-ipmi](https://github.com/knightmare2600/go-ipmi) (branch `fyrtaarn`, pinned
-by commit in `go.mod`'s `replace` line), which is upstream go-ipmi plus four fixes offered back
+by commit in `go.mod`'s `replace` line), which was upstream go-ipmi plus four fixes offered back
 upstream: [#113](https://github.com/bougou/go-ipmi/pull/113) (Set User Payload Access sent an
 empty request), [#114](https://github.com/bougou/go-ipmi/pull/114) (Get SEL Info sent before every
 record), [#115](https://github.com/bougou/go-ipmi/pull/115) (one unreadable sensor emptied the
 sensor list) and [#116](https://github.com/bougou/go-ipmi/pull/116) (cipher suite 0 sessions never
-completed). fyrtaarn already worked round the first three itself; the fourth needs the library.
-Once upstream releases them, the `replace` line goes and fyrtaarn returns to upstream go-ipmi.
+completed). fyrtaarn already worked round the first three itself; the fourth needed the library.
+All four merged upstream by 2026-11-27 (confirmed live via `gh pr view`), so the `replace` line is
+gone and fyrtaarn now builds straight from upstream go-ipmi again.
 
 | Commands | Sent by |
 |---|---|
@@ -996,6 +997,7 @@ For detailed technical writeups and excellent explanations of:
 
 - **Command-line options** — `-h`/`--help`, `-v`/`--version` (with the IPMI library the binary was built from), `-c`/`--check` (nmap, ipmitool, root, pseudo-terminals, IPMI backend; non-zero without nmap), `-n`/`--native` and `-i`/`--ipmitool` (the IPMI backend, overriding `FYRTAARN_IPMI`)
 - **Known Issues** — `refuses-empty-user-name` (Quanta): the BMC's own web interface deletes a user completely, which IPMI cannot
+- **go-ipmi fork retired** — all four fixes sent upstream as bougou/go-ipmi PRs #113-#116 are now merged (confirmed live, 2026-11-27); `go.mod`'s `replace` line onto knightmare2600/go-ipmi is removed and fyrtaarn builds from upstream go-ipmi directly again, `go mod tidy`/`go build`/`go test ./...` all clean
 
 ### 0.9.2
 

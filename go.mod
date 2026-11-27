@@ -3,7 +3,7 @@ module github.com/knightmare2600/fyrtaarn
 go 1.24.2
 
 require (
-	github.com/bougou/go-ipmi v0.9.2
+	github.com/bougou/go-ipmi v0.9.3-0.20261127101614-623949d96c28
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
@@ -41,5 +41,3 @@ require (
 	golang.org/x/term v0.34.0 // indirect
 	golang.org/x/text v0.28.0 // indirect
 )
-
-replace github.com/bougou/go-ipmi => github.com/knightmare2600/go-ipmi v0.9.3-0.20261124105454-da0424b9bf3c
